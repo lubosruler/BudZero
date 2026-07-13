@@ -25,6 +25,21 @@ pub struct ExecutionReceipt {
     pub state_writes_digest: [u8; 32],
 }
 
+/// Production builds use the Production ISA profile (VerifyMerkle disabled).
+/// Unit tests use Testing so Z-B harnesses can still exercise the opcode.
+fn decode_instruction(raw: u64) -> Result<bud_isa::Instruction, String> {
+    #[cfg(test)]
+    {
+        use bud_isa::IsaProfile;
+        bud_isa::Instruction::decode_for_profile(raw, IsaProfile::Testing)
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(test))]
+    {
+        bud_isa::Instruction::decode(raw)
+    }
+}
+
 pub struct Vm {
     pub registers: [u64; 32],
     pub pc: usize,
@@ -159,7 +174,7 @@ impl Vm {
         }
 
         let raw_inst = program[self.pc];
-        let inst = match Instruction::decode(raw_inst) {
+        let inst = match decode_instruction(raw_inst) {
             Ok(i) => i,
             Err(e) => {
                 self.halted = true;
@@ -721,7 +736,12 @@ impl Vm {
     pub fn gas_cost(opcode: Opcode) -> u64 {
         match opcode {
             Opcode::Halt => 0,
-            Opcode::Load | Opcode::Store | Opcode::SRead | Opcode::SWrite => 3,
+            // Memory ops stay cheap.
+            Opcode::Load | Opcode::Store => 3,
+            // Tur 11.9 / A12: storage ops are more expensive than plain memory
+            // (persist / state-root impact); price them above Load/Store.
+            Opcode::SRead => 8,
+            Opcode::SWrite => 12,
             Opcode::Poseidon | Opcode::VerifyMerkle => 10,
             Opcode::Call | Opcode::Ret | Opcode::Push | Opcode::Pop => 2,
             Opcode::Syscall => 5,
@@ -1027,5 +1047,17 @@ mod tests {
         assert_eq!(vm.trace[1].next_pc, 1);
         assert_eq!(vm.trace[1].dst_val, 0);
         assert!(vm.halted);
+    }
+
+    /// Tur 11.9 / A12: SRead/SWrite cost more gas than Load/Store.
+    #[test]
+    fn tur119_storage_gas_above_memory() {
+        assert_eq!(Vm::gas_cost(Opcode::Load), 3);
+        assert_eq!(Vm::gas_cost(Opcode::Store), 3);
+        assert_eq!(Vm::gas_cost(Opcode::SRead), 8);
+        assert_eq!(Vm::gas_cost(Opcode::SWrite), 12);
+        assert!(Vm::gas_cost(Opcode::SRead) > Vm::gas_cost(Opcode::Load));
+        assert!(Vm::gas_cost(Opcode::SWrite) > Vm::gas_cost(Opcode::Store));
+        assert!(Vm::gas_cost(Opcode::SWrite) > Vm::gas_cost(Opcode::SRead));
     }
 }

@@ -1913,7 +1913,7 @@ mod tests {
     /// security-critical direction. The valid-path case is
     /// tracked for Commit 3.5 (debug + lift the over-constraint).
     #[test]
-    #[ignore = "valid 64-depth path currently rejected (over-constrained); tracked for Commit 3.5"]
+    #[ignore = "Tur 11.9 / A13: valid 64-depth path still over-constrained (Z-B Commit 3.5); opcode gated off in Production ISA"]
     fn proves_verify_merkle_valid_64_depth() {
         let program = vec![
             inst(Opcode::VerifyMerkle, 1, 2, 3, 256),

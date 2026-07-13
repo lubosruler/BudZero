@@ -35,8 +35,12 @@ pub enum Opcode {
 }
 
 impl Opcode {
+    /// Opcodes that must not run under the Production ISA profile.
+    /// Tur 11.9 / A13: `VerifyMerkle` AIR is still over-constrained for valid
+    /// 64-depth paths (`proves_verify_merkle_valid_64_depth` is `#[ignore]`),
+    /// so production decode rejects it until Z-B Commit 3.5 lands.
     pub fn is_experimental(&self) -> bool {
-        false
+        matches!(self, Opcode::VerifyMerkle)
     }
 }
 
@@ -142,14 +146,18 @@ impl Instruction {
     pub fn decode_for_profile(val: u64, profile: IsaProfile) -> Result<Self, DecodeError> {
         let inst = Self::decode_any(val)?;
         if inst.opcode.is_experimental() {
-            #[cfg(not(feature = "experimental"))]
-            return Err(DecodeError::ExperimentalOpcodeDisabled(
-                inst.opcode,
-                profile,
-            ));
-
-            #[cfg(feature = "experimental")]
+            // Production always rejects experimental opcodes (Tur 11.9 / A13).
+            // Testing/Experimental profiles allow them so unit/ZK harnesses can
+            // exercise VerifyMerkle while mainnet decode stays closed.
             if profile == IsaProfile::Production {
+                return Err(DecodeError::ExperimentalOpcodeDisabled(
+                    inst.opcode,
+                    profile,
+                ));
+            }
+            #[cfg(not(feature = "experimental"))]
+            if profile == IsaProfile::Experimental {
+                // Experimental profile without the cargo feature still blocked.
                 return Err(DecodeError::ExperimentalOpcodeDisabled(
                     inst.opcode,
                     profile,
@@ -162,9 +170,55 @@ impl Instruction {
     pub fn decode(val: u64) -> Result<Self, String> {
         #[cfg(feature = "experimental")]
         let profile = IsaProfile::Experimental;
-        #[cfg(not(feature = "experimental"))]
+        #[cfg(all(not(feature = "experimental"), test))]
+        let profile = IsaProfile::Testing;
+        #[cfg(all(not(feature = "experimental"), not(test)))]
         let profile = IsaProfile::Production;
 
         Self::decode_for_profile(val, profile).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tur119_verify_merkle_disabled_in_production() {
+        let raw = Instruction {
+            opcode: Opcode::VerifyMerkle,
+            rd: 1,
+            rs1: 2,
+            rs2: 3,
+            imm: 0,
+        }
+        .encode();
+        let err = Instruction::decode_for_profile(raw, IsaProfile::Production)
+            .expect_err("VerifyMerkle must be disabled in Production");
+        match err {
+            DecodeError::ExperimentalOpcodeDisabled(
+                Opcode::VerifyMerkle,
+                IsaProfile::Production,
+            ) => {}
+            other => panic!("unexpected error: {other:?}"),
+        }
+        // decode_any still parses the opcode for experimental/test tooling.
+        let inst = Instruction::decode_any(raw).unwrap();
+        assert_eq!(inst.opcode, Opcode::VerifyMerkle);
+        assert!(inst.opcode.is_experimental());
+    }
+
+    #[test]
+    fn tur119_plain_opcodes_still_decode_in_production() {
+        let raw = Instruction {
+            opcode: Opcode::Add,
+            rd: 1,
+            rs1: 2,
+            rs2: 3,
+            imm: 0,
+        }
+        .encode();
+        let inst = Instruction::decode_for_profile(raw, IsaProfile::Production).unwrap();
+        assert_eq!(inst.opcode, Opcode::Add);
     }
 }

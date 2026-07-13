@@ -737,11 +737,14 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         let three = AB::Expr::from(AB::F::from_u64(3));
         let two = AB::Expr::from(AB::F::from_u64(2));
         let five = AB::Expr::from(AB::F::from_u64(5));
+        let eight = AB::Expr::from(AB::F::from_u64(8));
         let ten = AB::Expr::from(AB::F::from_u64(10));
+        let twelve = AB::Expr::from(AB::F::from_u64(12));
+        // Tur 11.9 / A12: SRead=8, SWrite=12 (must match Vm::gas_cost).
         let gas_cost = is_load.clone() * three.clone()
             + is_store.clone() * three.clone()
-            + is_sread.clone() * three.clone()
-            + is_swrite.clone() * three.clone()
+            + is_sread.clone() * eight.clone()
+            + is_swrite.clone() * twelve.clone()
             + is_poseidon.clone() * ten.clone()
             + is_verify_merkle.clone() * ten.clone()
             + is_call.clone() * two.clone()
