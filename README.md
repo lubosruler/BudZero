@@ -233,11 +233,20 @@ and the [Budlum documentation book][budlum-book].
 ```bash
 cargo check --workspace --all-targets     # Clean
 cargo clippy --workspace -- -D warnings   # Clean
-cargo test --workspace                    # 60 passed (51 prover + 9 compiler), 0 failed
+cargo test --workspace                    # 58 passed, 0 failed
 cargo test -p bud-compiler                # 9/9 (3 match + 6 baseline)
+cargo test -p bud-proof                   # 36 unit + 1 soundness_negative = 37/37
+cargo test -p bud-vm                      # 6 unit + 2 trace_fixtures = 8/8
+cargo test -p bud-state                   # 4/4
 cargo fmt --all -- --check                # Clean
 python3 scripts/check_docs_links.py       # 16 files, all links valid
 ```
+
+Note: README previously stated "51 tests" — the actual workspace test
+count after Tur 8 is **58** (36 bud-proof unit + 1 soundness_negative +
+9 bud-compiler + 6 bud-vm unit + 2 bud-vm trace_fixtures + 4 bud-state).
+The README was over-counting prover tests; the correct breakdown is
+above.
 
 ## License
 
