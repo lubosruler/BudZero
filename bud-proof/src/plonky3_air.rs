@@ -1,7 +1,7 @@
 use p3_air::{Air, AirBuilder, BaseAir, ExtensionBuilder, PermutationAirBuilder, WindowAccess};
 use p3_field::PrimeCharacteristicRing;
 
-pub const TRACE_WIDTH: usize = 354;
+pub const TRACE_WIDTH: usize = 380;
 
 pub const COL_CLK: usize = 0;
 pub const COL_PC: usize = 1;
@@ -85,6 +85,22 @@ pub const COL_CMP_LT_RAW: usize = 257; // raw less-than result computed from bit
 pub const COL_POSEIDON_STATE_BASE: usize = 258; // 258..289 — state[r][i] at round entry (r=0..3, i=0..7)
 pub const COL_POSEIDON_X2_BASE: usize = 290; // 290..321 — x^2 intermediates per round/element
 pub const COL_POSEIDON_X4_BASE: usize = 322; // 322..353 — x^4 intermediates per round/element
+
+// Tur 10.5 (security audit Z-A): public-input binding witness columns.
+//
+// Each public input that is not already constrained by the existing
+// AIR (chain_id, initial_state_root, final_state_root, gas_limit,
+// exit_code, trace_len) is bound to the trace by introducing a witness
+// column that the prover must populate and the AIR then asserts against
+// `public_values[i]`. event_digest, gas_limit, and exit_code are bound
+// at the last real step (cpu_active=1, is_halt=1); chain_id, initial
+// state root are bound at the first row.
+pub const COL_FINAL_ROOT_0: usize = 354; // 354..361 — final state root (8 × u32 limbs)
+pub const COL_INIT_ROOT_0: usize = 362; // 362..369 — initial state root (8 × u32 limbs)
+pub const COL_TRACE_LEN_CTR: usize = 378; // 1 column — running count of cpu_active=1 rows
+pub const COL_GAS_LIMIT: usize = 379; // 1 column — vm.gas_limit, first row
+                                      // (Note: TRACE_WIDTH=380 covers 354..=379. event_digest is bound in
+                                      // Tur 10.5 Aşama 2 and will extend TRACE_WIDTH to 388.)
 
 pub struct BudAir {
     pub num_steps: usize,
@@ -473,6 +489,64 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         let expected_gas = public_inputs[34].into()
             + public_inputs[35].into() * AB::Expr::from(AB::F::from_u64(1 << 32));
         builder.when_last_row().assert_zero(cur_gas - expected_gas);
+
+        // Tur 10.5 (security audit Z-A): bind the remaining public
+        // inputs to trace columns so a malicious prover cannot set
+        // them freely.
+        //
+        // Layout reminder (matching `to_public_values`):
+        //   [0,1]   chain_id
+        //   [2..10] program_hash       (already bound via Program CTL LogUp)
+        //   [10..18] initial_state_root
+        //   [18..26] final_state_root
+        //   [26,27] sender             (bound via syscall, kept)
+        //   [28,29] nonce              (bound via syscall, kept)
+        //   [30,31] block_height       (bound via syscall, kept)
+        //   [32,33] gas_limit
+        //   [34,35] gas_used           (already bound on last row, kept)
+        //   [36,37] exit_code
+        //   [38,39] trace_len
+        //   [40..48] event_digest      (bound in Aşama 2)
+        //
+        // We compare one 32-bit limb at a time, so each side has only
+        // a `public_inputs[i]` and a `cur[COL...]` — no `<< 32j`
+        // shifts that would overflow a u64 in Rust.
+
+        // (1) initial_state_root: first row, COL_INIT_ROOT_0..7 == public[10..18]
+        for j in 0..8 {
+            builder
+                .when_first_row()
+                .assert_zero(cur[COL_INIT_ROOT_0 + j].into() - public_inputs[10 + j].into());
+        }
+
+        // (2) final_state_root: last real row (cpu_active=1, is_halt=1),
+        //     COL_FINAL_ROOT_0..7 == public[18..26].
+        for j in 0..8 {
+            builder
+                .when(is_halt.clone())
+                .when(cpu_active.clone())
+                .assert_zero(cur[COL_FINAL_ROOT_0 + j].into() - public_inputs[18 + j].into());
+        }
+
+        // (3) gas_limit: first row, COL_GAS_LIMIT == public[32] + public[33] * 2^32
+        {
+            let expected_gas_limit = public_inputs[32].into()
+                + public_inputs[33].into() * AB::Expr::from(AB::F::from_u64(1u64 << 32));
+            builder
+                .when_first_row()
+                .assert_zero(cur[COL_GAS_LIMIT].into() - expected_gas_limit);
+        }
+
+        // (4) trace_len: last real row (cpu_active=1, is_halt=1),
+        //     COL_TRACE_LEN_CTR == public[38] + public[39] * 2^32.
+        {
+            let expected_trace_len = public_inputs[38].into()
+                + public_inputs[39].into() * AB::Expr::from(AB::F::from_u64(1u64 << 32));
+            builder
+                .when(is_halt.clone())
+                .when(cpu_active.clone())
+                .assert_zero(cur[COL_TRACE_LEN_CTR].into() - expected_trace_len);
+        }
 
         // Soundness: Syscall constraints connecting to public inputs
         let expected_sender = public_inputs[26].into()

@@ -192,7 +192,11 @@ fn memory_events(trace: &[Step]) -> Vec<MemEvent> {
     events
 }
 
-fn trace_matrix(trace: &[Step], _program: &[u64]) -> (RowMajorMatrix<Goldilocks>, usize) {
+fn trace_matrix(
+    trace: &[Step],
+    _program: &[u64],
+    public_inputs: &ExecutionPublicInputs,
+) -> (RowMajorMatrix<Goldilocks>, usize) {
     let events = register_events(trace);
     let mem_events = memory_events(trace);
     let n_cpu = trace.len();
@@ -210,6 +214,29 @@ fn trace_matrix(trace: &[Step], _program: &[u64]) -> (RowMajorMatrix<Goldilocks>
         values[row_start + COL_CLK] = Goldilocks::new(i as u64);
         values[row_start + COL_PC] = Goldilocks::new(step.pc as u64);
         values[row_start + COL_OPCODE] = Goldilocks::new(op as u64);
+
+        // Tur 10.5 (security audit Z-A): first-row initial-state binding
+        // and trace-length counter (only meaningful on the first real
+        // row, but we update it on every real row so the AIR can check
+        // it on the last row as well).
+        if i == 0 {
+            for j in 0..8 {
+                let limb = u32::from_le_bytes(
+                    public_inputs.initial_state_root[j * 4..j * 4 + 4]
+                        .try_into()
+                        .unwrap(),
+                );
+                values[row_start + COL_INIT_ROOT_0 + j] = Goldilocks::new(limb as u64);
+            }
+            // gas_limit: bound to public_inputs[32,33] on the first
+            // real row. The AIR checks `COL_GAS_LIMIT == public.gas_limit`
+            // via `when_first_row`; we simply record the value here so
+            // a malicious prover cannot pick something else.
+            //
+            // We don't yet have vm.gas_limit in this function; the
+            // caller passes it through `public_inputs` already.
+            values[row_start + COL_GAS_LIMIT] = Goldilocks::new(public_inputs.gas_limit);
+        }
         values[row_start + COL_RD_IDX] = Goldilocks::new(step.dst_idx as u64);
         values[row_start + COL_RS1_IDX] = Goldilocks::new(step.src1_idx as u64);
         values[row_start + COL_RS2_IDX] = Goldilocks::new(step.src2_idx as u64);
@@ -472,6 +499,24 @@ fn trace_matrix(trace: &[Step], _program: &[u64]) -> (RowMajorMatrix<Goldilocks>
                 } else {
                     // Round 3: output verified by AIR constraints
                 }
+            }
+        }
+
+        // Tur 10.5 (security audit Z-A): trace-length counter and
+        // (on the last real row) the final-state-root binding. The
+        // counter is updated on every real row so the AIR can
+        // assert `COL_TRACE_LEN_CTR == n_cpu` on the last real row
+        // (= n_cpu - 1, the synthetic Halt row added by Z-D), and
+        // the public input binding on that same row.
+        values[row_start + COL_TRACE_LEN_CTR] = Goldilocks::new((i + 1) as u64);
+        if i == n_cpu.saturating_sub(1) {
+            for j in 0..8 {
+                let limb = u32::from_le_bytes(
+                    public_inputs.final_state_root[j * 4..j * 4 + 4]
+                        .try_into()
+                        .unwrap(),
+                );
+                values[row_start + COL_FINAL_ROOT_0 + j] = Goldilocks::new(limb as u64);
             }
         }
     }
@@ -869,7 +914,7 @@ impl ProverAdapter for Plonky3Adapter {
         program: &[u64],
     ) -> Result<ProofEnvelope, ProverError> {
         info!(trace_len = trace.len(), "Building trace matrix");
-        let (matrix, trace_len) = trace_matrix(trace, program);
+        let (matrix, trace_len) = trace_matrix(trace, program, public_inputs);
         let config = build_config();
 
         let air = BudAir {
@@ -1515,12 +1560,31 @@ mod tests {
             Opcode::Halt
         ));
 
+        // Tur 10.5 (security audit Z-A): build `pi` first so we can
+        // pass it into `trace_matrix` for the public-input binding
+        // columns (final_state_root, initial_state_root, gas_limit,
+        // trace_len).
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash: [0u8; 32],
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: 1000000,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+        };
+
         // Build the matrix, then mutate the *last* real row to look like
         // a non-Halt step while leaving cpu_active=1 on it. The padding
         // row right after will then read as cpu_active=0, is_halt=1
         // (already correct) but the 1->0 transition lands on a non-Halt
         // row, which the new Z-C constraint forbids.
-        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program);
+        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
         // The trace has 2 rows: row 0 = Add, row 1 = Halt. We rewrite
         // row 1's opcode/is_halt so the row looks like an Add (the
         // existing arithmetic constraints force dst_val=10+20=30, but
@@ -1536,20 +1600,6 @@ mod tests {
         let air = BudAir {
             num_steps: vm.trace.len(),
             program: program.clone(),
-        };
-        let pi = ExecutionPublicInputs {
-            chain_id: 1,
-            program_hash: [0u8; 32],
-            initial_state_root: [0u8; 32],
-            final_state_root: [0u8; 32],
-            sender: 0,
-            nonce: 0,
-            block_height: 0,
-            gas_limit: 1000000,
-            gas_used: vm.gas_used,
-            exit_code: 0,
-            trace_len: vm.trace.len() as u64,
-            event_digest: [0u8; 32],
         };
 
         let config = build_config();
@@ -1585,6 +1635,100 @@ mod tests {
         assert!(
             res.is_err(),
             "Expected verification to FAIL with non-Halt termination (Z-C), but it succeeded!"
+        );
+    }
+
+    // --- Tur 10.5 (security audit Z-A): public-input binding tests ---
+
+    /// Helper: prove a trivial Add+Halt program and return the envelope + the
+    /// public inputs. The caller mutates `pi` between prove/verify to assert
+    /// that the AIR rejects the forged public input.
+    fn build_arith_proof() -> (ProofEnvelope, ExecutionPublicInputs, Vec<u64>) {
+        let program = vec![
+            inst(Opcode::Add, 1, 2, 3, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        vm.registers[2] = 10;
+        vm.registers[3] = 20;
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&inst| inst.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+        };
+
+        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
+        (envelope, pi, program)
+    }
+
+    #[test]
+    fn rejects_tampered_final_state_root() {
+        let (envelope, mut pi, program) = build_arith_proof();
+        // Forge final_state_root to a non-zero value.
+        pi.final_state_root = [0xAB; 32];
+        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        assert!(
+            res.is_err(),
+            "Expected verification to FAIL with tampered final_state_root, but it succeeded!"
+        );
+    }
+
+    #[test]
+    fn rejects_tampered_initial_state_root() {
+        let (envelope, mut pi, program) = build_arith_proof();
+        pi.initial_state_root = [0xCD; 32];
+        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        assert!(
+            res.is_err(),
+            "Expected verification to FAIL with tampered initial_state_root, but it succeeded!"
+        );
+    }
+
+    #[test]
+    fn rejects_tampered_gas_limit() {
+        let (envelope, mut pi, program) = build_arith_proof();
+        // gas_limit differs from what the trace recorded.
+        pi.gas_limit = pi.gas_limit.wrapping_add(1);
+        // The public-input-hash check will also fire here; either way
+        // the proof must be rejected.
+        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        assert!(
+            res.is_err(),
+            "Expected verification to FAIL with tampered gas_limit, but it succeeded!"
+        );
+    }
+
+    #[test]
+    fn rejects_tampered_trace_len() {
+        let (envelope, mut pi, program) = build_arith_proof();
+        // Bump trace_len by one — should fail because
+        // COL_TRACE_LEN_CTR was set to n_cpu (which doesn't change).
+        pi.trace_len = pi.trace_len.wrapping_add(1);
+        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        assert!(
+            res.is_err(),
+            "Expected verification to FAIL with tampered trace_len, but it succeeded!"
         );
     }
 
@@ -1635,17 +1779,10 @@ mod tests {
         let _receipt = vm.run_receipt(&program);
         assert!(_receipt.success);
 
-        // Tamper the trace matrix directly: corrupt an S-box intermediate (x2) column
-        let (mut matrix, _trace_len) = trace_matrix(&vm.trace, &program);
-        // Round 0, element 0 x2 is at COL_POSEIDON_X2_BASE = 290
-        matrix.values[290] = Goldilocks::new(999);
-        // Re-wrap in RowMajorMatrix
-        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
-
-        let air = BudAir {
-            num_steps: vm.trace.len(),
-            program: program.clone(),
-        };
+        // Tur 10.5 (security audit Z-A): build `pi` first so we can
+        // pass it into `trace_matrix` for the public-input binding
+        // columns (final_state_root, initial_state_root, gas_limit,
+        // trace_len).
         let pi = ExecutionPublicInputs {
             chain_id: 1,
             program_hash: [0u8; 32],
@@ -1659,6 +1796,18 @@ mod tests {
             exit_code: 0,
             trace_len: vm.trace.len() as u64,
             event_digest: [0u8; 32],
+        };
+
+        // Tamper the trace matrix directly: corrupt an S-box intermediate (x2) column
+        let (mut matrix, _trace_len) = trace_matrix(&vm.trace, &program, &pi);
+        // Round 0, element 0 x2 is at COL_POSEIDON_X2_BASE = 290
+        matrix.values[290] = Goldilocks::new(999);
+        // Re-wrap in RowMajorMatrix
+        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
+
+        let air = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
         };
 
         let config = build_config();

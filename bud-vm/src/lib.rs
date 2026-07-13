@@ -45,6 +45,11 @@ pub struct Context {
     pub sender: u64,
     pub nonce: u64,
     pub block_height: u64,
+    /// Tur 10.5 (security audit Z-A): initial state root.
+    /// The VM does not consume this directly (state roots are produced
+    /// externally), but the prover trace records it on the first row
+    /// so the AIR can bind `public_inputs.initial_state_root`.
+    pub initial_state_root: [u8; 32],
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +105,7 @@ impl Vm {
                 sender: 0,
                 nonce: 0,
                 block_height: 0,
+                initial_state_root: [0u8; 32],
             },
             trace: Vec::new(),
             halted: false,
