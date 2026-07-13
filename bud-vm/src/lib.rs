@@ -474,7 +474,11 @@ impl Vm {
                             poseidon4_hash(sibling, current)
                         };
                     }
-                    if current == root { 1 } else { 0 }
+                    if current == root {
+                        1
+                    } else {
+                        0
+                    }
                 } else {
                     0
                 };

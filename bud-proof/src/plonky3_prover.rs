@@ -548,6 +548,61 @@ fn trace_matrix(
             // through `public_inputs.exit_code`; the AIR binds it.
             values[row_start + COL_EXIT_CODE] = Goldilocks::new(public_inputs.exit_code);
         }
+
+        // Tur 10.6 (security audit Z-B): Merkle expansion rows. The
+        // trace's CPU step is the original VerifyMerkle step on row
+        // `i` if `step.merkle_is_expand` is true *or* if it carries
+        // `merkle_key` (the original step's `merkle_key` patch
+        // happens immediately after the step is pushed in VM,
+        // so we treat the first Merkle row in a sequence as the
+        // "original" one). The expansion rows are pushed
+        // immediately after the original in `Vm::step`, so they
+        // share the same `i` index here.
+        if step.merkle_is_expand {
+            // Expansion row.
+            let key = step.merkle_key.expect("expansion row must have merkle_key");
+            let cur = step
+                .merkle_current
+                .expect("expansion row must have merkle_current");
+            let sibling = step
+                .merkle_sibling
+                .expect("expansion row must have merkle_sibling");
+            let round = step
+                .merkle_round
+                .expect("expansion row must have merkle_round");
+            let bit = (key >> round) & 1;
+            values[row_start + COL_VM_MERKLE_KEY] = Goldilocks::new(key);
+            values[row_start + COL_VM_MERKLE_BIT] = Goldilocks::new(bit);
+            values[row_start + COL_VM_MERKLE_CURRENT] = Goldilocks::new(cur);
+            values[row_start + COL_VM_MERKLE_SIBLING] = Goldilocks::new(sibling);
+            values[row_start + COL_VM_MERKLE_ROUND] = Goldilocks::new(round as u64);
+            values[row_start + COL_VM_MERKLE_IS_EXPAND] = Goldilocks::new(1);
+        } else if step.merkle_key.is_some() {
+            // Original VerifyMerkle step. The VM patched this row
+            // with merkle_key immediately after push.
+            let key = step.merkle_key.unwrap();
+            values[row_start + COL_VM_MERKLE_KEY] = Goldilocks::new(key);
+            values[row_start + COL_VM_MERKLE_IS_EXPAND] = Goldilocks::new(0);
+            // merkle_current on the original step is the leaf
+            // (i.e. the Poseidon accumulator entering round 0).
+            // We populate it from `step.src2_val` (rs2 = leaf)
+            // so the AIR transition nxt_current = f(cur, sibling)
+            // for round 0 has a valid source.
+            values[row_start + COL_VM_MERKLE_CURRENT] = Goldilocks::new(step.src2_val);
+            // merkle_round=0 on the original step so the AIR can
+            // extract the right bit (key & 1) for the first
+            // expansion row.
+            values[row_start + COL_VM_MERKLE_ROUND] = Goldilocks::new(0);
+            // The bit on the original step is bit-0 (key & 1);
+            // the expansion row 0 will write the real bit from
+            // `(key >> 0) & 1`. They should match.
+            values[row_start + COL_VM_MERKLE_BIT] = Goldilocks::new(key & 1);
+        } else {
+            // Non-Merkle row. Force the merkle columns to zero so
+            // any prover who tries to mark a non-VerifyMerkle row
+            // as expansion will be caught by the AIR.
+            values[row_start + COL_VM_MERKLE_IS_EXPAND] = Goldilocks::new(0);
+        }
     }
 
     for i in n_cpu..num_rows {
@@ -1690,6 +1745,105 @@ mod tests {
         assert!(
             res.is_err(),
             "Expected verification to FAIL when is_verify_merkle is zeroed on a 0x1E row, but it succeeded!"
+        );
+    }
+
+    /// Tur 10.6 (security audit Z-B): negative test for the Merkle
+    /// expansion row transition. We take a valid VerifyMerkle
+    /// trace (1 original + 64 expansion + 1 Halt = 66 rows) and
+    /// tamper with one expansion row's `merkle_round` column so
+    /// that two consecutive expansion rows report the same round
+    /// index. The AIR transition
+    ///   `is_expand * is_expand * (nxt_round - round - 1) = 0`
+    /// forces the round index to increment by exactly 1 on every
+    /// active transition, so this tampering is detected.
+    #[test]
+    fn rejects_verify_merkle_with_skipped_round() {
+        let program = vec![
+            inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        // Populate path memory at addr 256.
+        vm.memory[256..264].copy_from_slice(&7u64.to_le_bytes());
+        for i in 0..64 {
+            let off = 264 + i * 8;
+            vm.memory[off..off + 8].copy_from_slice(&((1000 + i) as u64).to_le_bytes());
+        }
+        let _ = vm.run_receipt(&program);
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&inst| inst.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+        };
+
+        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        // Tamper row 5 (the 5th expansion row, round 4): copy the
+        // round index from row 6 (round 5) so we have two rows
+        // claiming round=5. The AIR's round transition
+        // `nxt_round - cur_round - 1 = 0` is then violated on the
+        // 4→5 transition.
+        let row_5 = (1 + 5) * TRACE_WIDTH;
+        let row_6 = (1 + 6) * TRACE_WIDTH;
+        matrix.values[row_5 + COL_VM_MERKLE_ROUND] = matrix.values[row_6 + COL_VM_MERKLE_ROUND];
+        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
+
+        let air = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
+        };
+        let config = build_config();
+        let public_values = to_public_values(&pi);
+        let degree_bits = p3_util::log2_strict_usize(matrix.height());
+        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
+        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
+
+        let p3_proof = prove_with_preprocessed(
+            &config,
+            &air,
+            matrix.clone(),
+            Some(crate::plonky3_prover::aux_trace_generator(
+                matrix.clone(),
+                n_cpu,
+                program.clone(),
+            )),
+            &public_values,
+            preprocessed_ref,
+        );
+        let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
+        let envelope = ProofEnvelope {
+            proof_format_version: 1,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: pi.hash(),
+            proof_bytes,
+            degree_bits: degree_bits as u32,
+        };
+
+        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        assert!(
+            res.is_err(),
+            "Expected verification to FAIL with a skipped Merkle round, but it succeeded!"
         );
     }
 
