@@ -64,17 +64,20 @@ cargo test --workspace
 
 ## Soundness work (honest status)
 
-AIR/public-input binding and Merkle verification are under active hardening (Tur 10–12):
+Aligned with [budlum-xyz/BudZero](https://github.com/budlum-xyz/BudZero) phases 0–12. Org README claims “all 31 opcodes production”; **this fork keeps `VerifyMerkle` experimental** until the 64-depth positive proof is green.
 
 | Item | Status |
 | --- | --- |
-| Public inputs (Z-A phases) | Partial binding on recent commits |
-| `VerifyMerkle` path AIR (Z-B) | Expansion rows + constraints; **valid 64-depth positive test still `#[ignore]`** |
-| Production gate | `VerifyMerkle` treated as experimental — **off in Production profile** |
-| Termination / halt (Z-C/D) | Constraints + VM behaviour iterated in Tur 10.zk |
-| Storage gas (SRead/SWrite) | Higher than Load/Store; AIR gas table aligned |
+| Public inputs (Z-A) | Bound (incl. event_digest Log fix Tur 12.9) |
+| `VerifyMerkle` path AIR (Z-B) | Expansion + Poseidon round checks; **Tur 13 partial**: pre-round currents, single-round path hash, original-only root check, expand gas |
+| Valid 64-depth prove | **`#[ignore]`** — still `InvalidProof` (Commit 3.5 remaining) |
+| Production gate | `VerifyMerkle` **experimental** — off in Production decode |
+| Termination / halt (Z-C/D) | Landed Tur 10.zk |
+| Storage gas (SRead/SWrite) | Higher than Load/Store; AIR aligned |
+| Phase 10 performance benches | Planned Tur **13.5** |
+| Phase 11 external audit | Checklist Tur **13.9** (not claimed done) |
 
-Until Z-B Commit 3.5 lands, do **not** treat Merkle membership inside STARK proofs as production-safe.
+Until Z-B Commit 3.5 lands, do **not** treat Merkle membership inside STARK proofs as production-safe. **B.U.D.** proof-of-storage (org storage vision) is **Tur 14**, not this repo’s L1 host work.
 
 ---
 

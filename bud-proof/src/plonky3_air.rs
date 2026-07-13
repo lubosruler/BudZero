@@ -479,9 +479,8 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // (round=0) the previous row is the original step; for
         // subsequent rows the previous is the previous expansion
         // row. We enforce the transition below.
-        builder
-            .when(is_expand.clone())
-            .assert_bool(merkle_round.clone());
+        // Tur 13 / Z-B 3.5: merkle_round is 0..63 (not boolean). Bound via
+        // expand→expand transition (+1) and first expansion round=0 leaf bind.
 
         // Sibling and current are u64 limbs; no further constraint
         // on their magnitudes (the Goldilocks field is large
@@ -507,11 +506,22 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // is not expansion (which happens at the boundary
         // between two VerifyMerkle calls or at the start/end of
         // the trace).
+        // Tur 13 / Z-B 3.5: key continuity only when staying in / entering
+        // expansion — not when leaving expansion to Halt (next key is 0).
         builder
             .when_transition()
             .when(cpu_active.clone())
             .assert_zero(
-                (is_expand.clone() - nxt_is_expand.clone())
+                is_expand.clone()
+                    * nxt_is_expand.clone()
+                    * (merkle_key.clone() - nxt[COL_VM_MERKLE_KEY].into()),
+            );
+        builder
+            .when_transition()
+            .when(cpu_active.clone())
+            .assert_zero(
+                is_verify_merkle.clone()
+                    * nxt_is_expand.clone()
                     * (merkle_key.clone() - nxt[COL_VM_MERKLE_KEY].into()),
             );
 
@@ -638,23 +648,27 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         //   rd_val_new == diff * diff_inv
         // on the original step's row (is_verify_merkle = 1,
         // merkle_final_flag = 1).
+        // Tur 13 / Z-B 3.5: equality boolean via inverse witness on the
+        // *original* VerifyMerkle step only. Expansion rows reuse opcode 0x1E
+        // so is_verify_merkle=1 on them too — must gate with (1 - is_expand).
+        //   prod = diff * inv ∈ {0,1}
+        //   eq = 1 - prod  (1 when final==root, 0 otherwise)
+        //   diff * eq = 0
+        //   rd_val_new == eq
+        let on_original: AB::Expr = is_verify_merkle.clone() * (one.clone() - is_expand.clone());
         let merkle_diff_inv: AB::Expr = cur[COL_MERKLE_DIFF_INV].into();
         let diff: AB::Expr = merkle_current.clone() - rs1_val.clone();
-        builder.when(is_verify_merkle.clone()).assert_zero(
-            diff.clone()
-                * merkle_diff_inv.clone()
-                * (one.clone() - diff.clone() * merkle_diff_inv.clone()),
-        );
+        let prod: AB::Expr = diff.clone() * merkle_diff_inv.clone();
         builder
-            .when(is_verify_merkle.clone())
-            .assert_zero(diff.clone() * (one.clone() - diff.clone() * merkle_diff_inv.clone()));
-        // rd_val_new == diff * diff_inv  (forced by the
-        // existing Tur 10.5 constraint
-        // `is_verify_merkle -> assert_bool(rd_val_new)` plus the
-        // identity above; we additionally force equality):
+            .when(on_original.clone())
+            .assert_zero(prod.clone() * (one.clone() - prod.clone()));
+        let eq: AB::Expr = one.clone() - prod.clone();
         builder
-            .when(is_verify_merkle.clone())
-            .assert_zero(rd_val_new.clone() - diff.clone() * merkle_diff_inv.clone());
+            .when(on_original.clone())
+            .assert_zero(diff.clone() * eq.clone());
+        builder
+            .when(on_original.clone())
+            .assert_zero(rd_val_new.clone() - eq);
 
         // Tur 10.6 Commit 3, leaf binding: the first expansion
         // row (round 0) must have merkle_current = the original
@@ -669,6 +683,12 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             .when(is_verify_merkle.clone())
             .when(nxt_is_expand.clone())
             .assert_zero(nxt_merkle_current.clone() - rs2_val.clone());
+        // First expansion row round index must be 0.
+        builder
+            .when_transition()
+            .when(is_verify_merkle.clone())
+            .when(nxt_is_expand.clone())
+            .assert_zero(nxt[COL_VM_MERKLE_ROUND].into());
 
         // (Old long comment removed; the inverse-witness and
         // Poseidon constraints above close Z-B. The leaf
@@ -746,7 +766,8 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             + is_sread.clone() * eight.clone()
             + is_swrite.clone() * twelve.clone()
             + is_poseidon.clone() * ten.clone()
-            + is_verify_merkle.clone() * ten.clone()
+            // Tur 13: expansion rows reuse opcode 0x1E but must not re-charge gas.
+            + is_verify_merkle.clone() * (one.clone() - is_expand.clone()) * ten.clone()
             + is_call.clone() * two.clone()
             + is_ret.clone() * two.clone()
             + is_push.clone() * two.clone()

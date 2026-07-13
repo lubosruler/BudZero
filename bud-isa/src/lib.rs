@@ -36,9 +36,9 @@ pub enum Opcode {
 
 impl Opcode {
     /// Opcodes that must not run under the Production ISA profile.
-    /// Tur 11.9 / A13: `VerifyMerkle` AIR is still over-constrained for valid
-    /// 64-depth paths (`proves_verify_merkle_valid_64_depth` is `#[ignore]`),
-    /// so production decode rejects it until Z-B Commit 3.5 lands.
+    /// Tur 13: VerifyMerkle stays experimental until Z-B Commit 3.5
+    /// (`proves_verify_merkle_valid_64_depth` green). Partial path fixes landed
+    /// (pre-round currents, single-round hash, original-only root check).
     pub fn is_experimental(&self) -> bool {
         matches!(self, Opcode::VerifyMerkle)
     }

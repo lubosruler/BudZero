@@ -648,6 +648,16 @@ fn trace_matrix(
             // (1 only here) to apply the final root check on the
             // *64th* expansion row's `merkle_current`.
             values[row_start + COL_MERKLE_FINAL_FLAG] = Goldilocks::new(1);
+            // Tur 13 / Z-B 3.5: inverse-witness for final root equality check.
+            // rd_val_new is constrained to equal (final == root) as a field boolean.
+            let root = step.src1_val;
+            let diff = final_merkle.wrapping_sub(root);
+            let inv = if diff != 0 {
+                bud_vm::field_inverse_goldilocks(diff)
+            } else {
+                0
+            };
+            values[row_start + COL_MERKLE_DIFF_INV] = Goldilocks::new(inv);
         } else {
             // Non-Merkle row. Force the merkle columns to zero so
             // any prover who tries to mark a non-VerifyMerkle row
@@ -1958,16 +1968,11 @@ mod tests {
     /// (constructed by walking the path in software) and assert
     /// the proof verifies end-to-end.
     ///
-    /// Currently ignored: the AIR is over-constrained for valid
-    /// paths (one or more of the new constraints rejects a
-    /// faithfully-generated trace). Two negative tests
-    /// (`rejects_verify_merkle_with_tampered_final_accumulator`
-    /// and `rejects_verify_merkle_with_tampered_poseidon_sbox`)
-    /// confirm the AIR rejects forgeries, which is the
-    /// security-critical direction. The valid-path case is
-    /// tracked for Commit 3.5 (debug + lift the over-constraint).
+    /// Z-B Commit 3.5 target: valid 64-depth path. Partial fixes landed in
+    /// Tur 13 (pre-round currents, single-round hash align, original-only
+    /// root check, expand gas). Still ignored until full prove is green.
     #[test]
-    #[ignore = "Tur 11.9 / A13: valid 64-depth path still over-constrained (Z-B Commit 3.5); opcode gated off in Production ISA"]
+    #[ignore = "Z-B Commit 3.5: valid 64-depth still InvalidProof; opcode Production-gated"]
     fn proves_verify_merkle_valid_64_depth() {
         let program = vec![
             inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
@@ -1983,9 +1988,9 @@ mod tests {
         for (i, &sibling) in siblings.iter().enumerate() {
             let bit = (key >> i) & 1;
             current = if bit == 0 {
-                bud_vm::poseidon4_hash(current, sibling)
+                bud_vm::merkle_poseidon_round(current, sibling)
             } else {
-                bud_vm::poseidon4_hash(sibling, current)
+                bud_vm::merkle_poseidon_round(sibling, current)
             };
         }
         let root = current;
@@ -1999,7 +2004,7 @@ mod tests {
 
         let receipt = vm.run_receipt(&program);
         assert!(receipt.success);
-        // 1 + 64 + 1 = 66 rows.
+        // 1 original + 64 expansion + 1 Halt = 66 rows.
         assert_eq!(vm.trace.len(), 66);
 
         let program_bytes: Vec<u8> = program
@@ -2057,9 +2062,9 @@ mod tests {
         for (i, &sibling) in siblings.iter().enumerate() {
             let bit = (key >> i) & 1;
             current = if bit == 0 {
-                bud_vm::poseidon4_hash(current, sibling)
+                bud_vm::merkle_poseidon_round(current, sibling)
             } else {
-                bud_vm::poseidon4_hash(sibling, current)
+                bud_vm::merkle_poseidon_round(sibling, current)
             };
         }
         let root = current;
@@ -2171,9 +2176,9 @@ mod tests {
         for (i, &sibling) in siblings.iter().enumerate() {
             let bit = (key >> i) & 1;
             current = if bit == 0 {
-                bud_vm::poseidon4_hash(current, sibling)
+                bud_vm::merkle_poseidon_round(current, sibling)
             } else {
-                bud_vm::poseidon4_hash(sibling, current)
+                bud_vm::merkle_poseidon_round(sibling, current)
             };
         }
         let root = current;

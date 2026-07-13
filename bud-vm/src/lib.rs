@@ -477,6 +477,7 @@ impl Vm {
                     // correct result here so the trace is faithful
                     // to the VM semantics; the AIR will additionally
                     // constrain it via the expansion path.
+                    // Tur 13 / Z-B 3.5: path hash must match AIR single-round.
                     let mut current = leaf;
                     for i in 0..64 {
                         let sibling_addr = path_addr + 8 + i * 8;
@@ -484,9 +485,9 @@ impl Vm {
                         let sibling = u64::from_le_bytes(bytes);
                         let bit = (key >> i) & 1;
                         current = if bit == 0 {
-                            poseidon4_hash(current, sibling)
+                            merkle_poseidon_round(current, sibling)
                         } else {
-                            poseidon4_hash(sibling, current)
+                            merkle_poseidon_round(sibling, current)
                         };
                     }
                     if current == root {
@@ -559,17 +560,20 @@ impl Vm {
                 // `current` accumulator is computed here (in the VM)
                 // for the trace's faithfulness, and the AIR
                 // re-derives it independently in Commit 2.
-                let mut current = src2_val; // leaf
+                // Tur 13 / Z-B 3.5: expansion rows carry the *pre-round*
+                // accumulator so AIR can check nxt = poseidon(cur, sibling).
+                let mut current = src2_val; // leaf input to round 0
                 for i in 0..64u8 {
                     let sibling_addr = path_addr + 8 + (i as usize) * 8;
                     let mut sb = [0u8; 8];
                     sb.copy_from_slice(&self.memory[sibling_addr..sibling_addr + 8]);
                     let sibling = u64::from_le_bytes(sb);
                     let bit = (key >> i) & 1;
+                    let input = current;
                     current = if bit == 0 {
-                        poseidon4_hash(current, sibling)
+                        merkle_poseidon_round(input, sibling)
                     } else {
-                        poseidon4_hash(sibling, current)
+                        merkle_poseidon_round(sibling, input)
                     };
                     self.trace.push(Step {
                         pc: cur_pc,
@@ -593,7 +597,7 @@ impl Vm {
                         is_memory_write: false,
                         stack_pointer: self.stack.len(),
                         merkle_key: Some(key),
-                        merkle_current: Some(current),
+                        merkle_current: Some(input), // pre-round
                         merkle_sibling: Some(sibling),
                         merkle_round: Some(i),
                         merkle_is_expand: true,
@@ -748,6 +752,23 @@ impl Vm {
             _ => 1,
         }
     }
+}
+
+/// Single-round Poseidon used by `VerifyMerkle` path hashing (Tur 13 / Z-B 3.5).
+/// Must match `BudAir` Merkle expansion constraints (RC0 + MDS first row [7,1]).
+/// Distinct from `poseidon4_hash` (4 full rounds) used by the Poseidon opcode.
+pub fn merkle_poseidon_round(a: u64, b: u64) -> u64 {
+    const P: u64 = 0xFFFFFFFF00000001;
+    const RC0: [u64; 2] = [0xdd5743e7f2a5a5d9, 0xcb3a864e58ada44b];
+    let s0 = ((a as u128 + RC0[0] as u128) % P as u128) as u64;
+    let s1 = ((b as u128 + RC0[1] as u128) % P as u128) as u64;
+    let sbox = |x: u64| -> u64 {
+        let x2 = ((x as u128 * x as u128) % P as u128) as u64;
+        let x4 = ((x2 as u128 * x2 as u128) % P as u128) as u64;
+        (((x4 as u128 * x2 as u128) % P as u128 * x as u128) % P as u128) as u64
+    };
+    let out = (7u128 * sbox(s0) as u128 + sbox(s1) as u128) % P as u128;
+    out as u64
 }
 
 /// 4-round Poseidon hash over Goldilocks field (alpha=7, width=8, full rounds only).
