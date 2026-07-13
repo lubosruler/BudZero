@@ -68,6 +68,18 @@ pub struct Step {
     pub memory_val: Option<u64>,
     pub is_memory_write: bool,
     pub stack_pointer: usize,
+    /// Tur 10.6 (security audit Z-B): Merkle path expansion rows. The
+    /// original step that triggers a `VerifyMerkle` has these set to
+    /// `None` and `merkle_is_expand = false`; the 64 follow-up
+    /// "expansion" rows (one per Poseidon round) carry the key, the
+    /// current Poseidon accumulator, the sibling hash for that round,
+    /// and the round index. The AIR uses these to verify the path
+    /// against the claimed root (`rs1_val`).
+    pub merkle_key: Option<u64>,
+    pub merkle_current: Option<u64>,
+    pub merkle_sibling: Option<u64>,
+    pub merkle_round: Option<u8>,
+    pub merkle_is_expand: bool,
 }
 
 pub fn field_inverse_goldilocks(val: u64) -> u64 {
@@ -430,12 +442,26 @@ impl Vm {
                 let path_addr = inst.imm as usize;
                 // Memory layout: [key: u64, 64 × sibling: u64]
                 // Total: 520 bytes (65 × u64)
+                //
+                // Tur 10.6 (security audit Z-B): the original step
+                // records `merkle_key` and `dst_val = 0` (the result is
+                // not known yet — it will be set by the final expansion
+                // round). 64 follow-up "expansion" rows are pushed
+                // immediately, one per Poseidon round, so the AIR can
+                // verify the path row-by-row.
                 let path_end = path_addr.wrapping_add(8 * 65);
                 let result = if path_end <= self.memory.len() {
                     let mut bytes = [0u8; 8];
                     bytes.copy_from_slice(&self.memory[path_addr..path_addr + 8]);
                     let key = u64::from_le_bytes(bytes);
-
+                    // We keep the path's result computation for
+                    // backward compatibility (so the dst register
+                    // still gets the correct answer), but the
+                    // *sound* verification lives in the expansion
+                    // rows the AIR checks. dst_val is set to the
+                    // correct result here so the trace is faithful
+                    // to the VM semantics; the AIR will additionally
+                    // constrain it via the expansion path.
                     let mut current = leaf;
                     for i in 0..64 {
                         let sibling_addr = path_addr + 8 + i * 8;
@@ -448,15 +474,21 @@ impl Vm {
                             poseidon4_hash(sibling, current)
                         };
                     }
-                    if current == root {
-                        1
-                    } else {
-                        0
-                    }
+                    if current == root { 1 } else { 0 }
                 } else {
                     0
                 };
                 self.registers[dst_idx as usize] = result;
+                // Stash the path key on the VM so the expansion rows
+                // (pushed immediately below) can read it. We use a
+                // local `Vec<(u64, u64, u8)>`-style scratch on `self`
+                // by reusing a private field — but to keep the
+                // signature simple we just walk the path twice
+                // (once for `result`, once for the expansion rows
+                // below). For depth 64 this is 2*64=128 hashes per
+                // VerifyMerkle, which is acceptable for an audit
+                // milestone and is in any case dwarfed by the
+                // 64*8 single-round hash cost of the AIR.
                 self.pc += 1;
                 (result, cur_pc + 1)
             }
@@ -479,7 +511,77 @@ impl Vm {
             memory_val,
             is_memory_write,
             stack_pointer: self.stack.len(),
+            merkle_key: None,
+            merkle_current: None,
+            merkle_sibling: None,
+            merkle_round: None,
+            merkle_is_expand: false,
         });
+
+        // Tur 10.6 (security audit Z-B): if the just-pushed step is a
+        // VerifyMerkle, immediately push 64 follow-up "expansion"
+        // rows. Each row carries the current Poseidon accumulator,
+        // the sibling hash for that round, the round index, and the
+        // key (the AIR uses these to verify the path). The original
+        // step's `merkle_key` is also set here (post-push, in-place
+        // via index) so the AIR knows the path's key.
+        if matches!(inst.opcode, Opcode::VerifyMerkle) {
+            let path_addr = inst.imm as usize;
+            let path_end = path_addr.wrapping_add(8 * 65);
+            if path_end <= self.memory.len() {
+                let mut bytes = [0u8; 8];
+                bytes.copy_from_slice(&self.memory[path_addr..path_addr + 8]);
+                let key = u64::from_le_bytes(bytes);
+                // Patch the just-pushed step to carry the key.
+                if let Some(last) = self.trace.last_mut() {
+                    last.merkle_key = Some(key);
+                }
+                // Walk the path and push 64 expansion rows. The
+                // `current` accumulator is computed here (in the VM)
+                // for the trace's faithfulness, and the AIR
+                // re-derives it independently in Commit 2.
+                let mut current = src2_val; // leaf
+                for i in 0..64u8 {
+                    let sibling_addr = path_addr + 8 + (i as usize) * 8;
+                    let mut sb = [0u8; 8];
+                    sb.copy_from_slice(&self.memory[sibling_addr..sibling_addr + 8]);
+                    let sibling = u64::from_le_bytes(sb);
+                    let bit = (key >> i) & 1;
+                    current = if bit == 0 {
+                        poseidon4_hash(current, sibling)
+                    } else {
+                        poseidon4_hash(sibling, current)
+                    };
+                    self.trace.push(Step {
+                        pc: cur_pc,
+                        next_pc: cur_pc + 1, // expansion rows don't move pc
+                        instruction: Instruction {
+                            opcode: Opcode::VerifyMerkle, // reused; merkle_is_expand marks it
+                            rd: 0,
+                            rs1: 0,
+                            rs2: 0,
+                            imm: 0,
+                        },
+                        src1_idx: 0,
+                        src2_idx: 0,
+                        dst_idx: 0,
+                        src1_val: 0,
+                        src2_val: 0,
+                        dst_val: 0,
+                        registers: self.registers,
+                        memory_addr: None,
+                        memory_val: None,
+                        is_memory_write: false,
+                        stack_pointer: self.stack.len(),
+                        merkle_key: Some(key),
+                        merkle_current: Some(current),
+                        merkle_sibling: Some(sibling),
+                        merkle_round: Some(i),
+                        merkle_is_expand: true,
+                    });
+                }
+            }
+        }
 
         debug!(
             pc = cur_pc,
@@ -554,6 +656,11 @@ impl Vm {
                     memory_val: None,
                     is_memory_write: false,
                     stack_pointer: self.stack.len(),
+                    merkle_key: None,
+                    merkle_current: None,
+                    merkle_sibling: None,
+                    merkle_round: None,
+                    merkle_is_expand: false,
                 });
                 self.halted = true;
             }
@@ -818,6 +925,66 @@ mod tests {
         let receipt2 = vm2.run_receipt(&program_store_oob);
         assert!(!receipt2.success);
         assert_eq!(receipt2.error, Some(VmError::InvalidMemoryAccess));
+    }
+
+    /// Tur 10.6 (security audit Z-B): `VerifyMerkle` must produce
+    /// 1 original step + 64 expansion rows (one per Poseidon round),
+    /// so the AIR can verify the path row-by-row. The original
+    /// step carries `merkle_key`; each expansion row carries
+    /// `merkle_current`, `merkle_sibling`, and `merkle_round`.
+    #[test]
+    fn verify_merkle_emits_64_expansion_rows() {
+        // Build a simple program that runs VerifyMerkle and then Halt.
+        // Memory layout for the path: [key (8 bytes), 64×sibling (8 each)]
+        // → 520 bytes. We populate the first 64×8 bytes with a
+        // deterministic pattern; the key is `key = 0` so every
+        // round uses bit = 0 (i.e. current = poseidon(current, sibling)).
+        let program = vec![
+            inst(Opcode::VerifyMerkle, 1, 2, 3, 256), // path_addr = 256
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        // Put a non-zero key and deterministic siblings.
+        vm.memory[256..264].copy_from_slice(&7u64.to_le_bytes());
+        for i in 0..64 {
+            let off = 264 + i * 8;
+            vm.memory[off..off + 8].copy_from_slice(&(1000u64 + i as u64).to_le_bytes());
+        }
+        // leaf and root registers don't matter for the trace-length
+        // assertion.
+        vm.registers[2] = 0xDEAD;
+        vm.registers[3] = 0xBEEF;
+
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        // 1 VerifyMerkle + 64 expansion rows + 1 Halt = 66
+        assert_eq!(
+            vm.trace.len(),
+            66,
+            "expected 1 VerifyMerkle + 64 expansion + 1 Halt = 66, got {}",
+            vm.trace.len()
+        );
+        // The original step must carry merkle_key = Some(7).
+        let first = &vm.trace[0];
+        assert_eq!(first.instruction.opcode, Opcode::VerifyMerkle);
+        assert_eq!(first.merkle_key, Some(7));
+        assert!(!first.merkle_is_expand);
+        // Each expansion row must carry merkle_round = Some(i).
+        for i in 0..64 {
+            let row = &vm.trace[1 + i];
+            assert!(
+                row.merkle_is_expand,
+                "row {i} should be marked as expansion"
+            );
+            assert_eq!(row.merkle_key, Some(7));
+            assert_eq!(row.merkle_round, Some(i as u8));
+            assert!(row.merkle_current.is_some());
+            assert!(row.merkle_sibling.is_some());
+        }
+        // The final Halt must NOT be an expansion row.
+        let last = &vm.trace[65];
+        assert_eq!(last.instruction.opcode, Opcode::Halt);
+        assert!(!last.merkle_is_expand);
     }
 
     /// Tur 10 (security audit Z-D): when the program terminates on an
