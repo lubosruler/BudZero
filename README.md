@@ -2,7 +2,17 @@
 
 BudZKVM is a ZK-native virtual machine, language toolchain, and STARK proving stack built around a small deterministic ISA (31 opcodes), a trace-generating VM, and a Plonky3 0.5.2-based prover backend.
 
-**Faz 0 completed** — 31/31 opcodes production-ready, full AIR constraint coverage, 51 tests (8 negative), 0 failures.
+**Faz 0 completed** — 31/31 opcodes production-ready, full AIR constraint coverage, full BudL compiler with pattern matching, 9 compiler tests, 0 failures.
+
+## Recent Milestones (Tur 1–8)
+
+- **Tur 1–7 (Faz 0 hardening)**: 31/31 opcodes production-ready, AIR constraint coverage, 8 negative soundness tests, 3-table LogUp CTL, 64-depth sparse Merkle tree, structured tracing, CI pipeline.
+- **Tur 8 (BudL compiler maturity)** — *just landed*:
+  - **`match` expressions** in BudL — pattern matching on integer scrutinees, with integer literal patterns (`0`, `42`) and a wildcard arm (`_`).
+  - Statement-level form: `match (x) { 0 => { emit X(0); }, _ => { emit X(999); } };`
+  - **ZK-circuit-friendly codegen**: linear jump chain (one `Sub` + one `Jnz` per integer arm, unconditional `Jmp` for the wildcard). At most one arm body executes per match, so the prover's trace records exactly one branch — no prover-side non-determinism.
+  - 3 new compiler tests cover dispatch, multi-statement block bodies, and pattern rejection.
+  - 9/9 bud-compiler tests green; 51/51 prover tests still green.
 
 ## Production Hardening Achievements
 
@@ -26,12 +36,47 @@ BudZKVM has completed its core production hardening plan:
 | --- | --- |
 | `bud-isa` | Instruction encoding, opcode definitions (31 opcodes), bytecode primitives |
 | `bud-vm` | Deterministic VM (32 reg, 64-bit, gas-metered), execution trace generation |
-| `bud-compiler` | BudL compiler: lexer, recursive-descent parser, semantic analysis, codegen |
+| `bud-compiler` | BudL compiler: lexer, recursive-descent parser, semantic analysis, codegen. **Tur 8**: `match` expressions, struct literals, while/for loops, user function calls |
 | `bud-proof` | Plonky3 0.5.2 STARK prover, 354-column trace matrix, LogUp CTL, custom `bud_stark` |
 | `bud-cli` | CLI: compile, deploy, run, prove, verify, batch (with structured tracing) |
 | `bud-state` | File-backed state, 64-depth SMT, account model, transactional commit/rollback |
 | `bud-node` | Node integration layer (placeholder for future P2P/RPC) |
 | `docs` | Turkish book-style documentation (10 chapters + 3 guides) |
+
+## BudL Language — Tur 8 Surface
+
+The BudL compiler now supports the following language features (incremental
+rollout across Tur 1–8):
+
+| Feature | Status | Tur |
+| --- | --- | --- |
+| `let` bindings, integer literals, hex literals, arithmetic | ✅ | 1–2 |
+| `if` / `else` (statement form) | ✅ | 3 |
+| `while` loops | ✅ | 3 |
+| `for i in start..end` loops | ✅ | 4 |
+| User-defined function calls (`fn` + `Call`/`Ret` ABI) | ✅ | 5 |
+| Comments (`//` and `/* */`) | ✅ | 5 |
+| Structs, dynamic heap memory (r31 HEAP_PTR) | ✅ | 6 |
+| Static type system (sema: `u64`/`bool`/field) | ✅ | 7 |
+| **Pattern matching (`match` expressions)** | ✅ | **8** |
+| Algebraic data types, range patterns, exhaustiveness checking | ⏳ | 9+ |
+| Witness variables, private ZK inputs | ⏳ | 9+ |
+| Error spans with line/column | ⏳ | 9+ |
+
+### Example: `match` in BudL
+
+```bud
+contract MatchExample {
+    pub fn main() {
+        let x = 0;
+        match (x) {
+            0 => { emit Result(100); },
+            1 => { emit Result(200); },
+            _ => { emit Result(999); },
+        };
+    }
+}
+```
 
 ## Quick Start
 
@@ -102,7 +147,8 @@ VM Trace (Vec<Step>)
 - [x] User-defined function calls (Call/Ret, caller-saved registers)
 - [x] Static Type System (Semantic Analyzer, u64/bool/field, return types)
 - [x] Struct support and Dynamic Heap Memory (r31 HEAP_PTR)
-- [ ] Pattern matching (`match` expressions) and better error spans
+- [x] **Pattern matching (`match` expressions) — Tur 8**
+- [ ] Better error spans (line/column tracking) — Tur 9+
 
 ### ✅ Phase 4: Plonky3 0.5.2 Prover (complete)
 - [x] StarkGenericConfig, PCS, challenger wiring
@@ -148,17 +194,47 @@ VM Trace (Vec<Step>)
 ## Near-Term Plan (Faz 2 - Compiler Olgunlaştırma)
 
 1. **Error Spans**: Adding line/column numbers to compile errors.
-2. **Match Expressions**: Adding pattern matching.
-3. **Witness Variables**: Private ZK inputs support.
-4. Benchmark suite (criterion) — proving/verification time, proof size.
-5. Prover parallelism optimization (Rayon).
+2. **Algebraic Data Types & Exhaustiveness**: structs/enums as pattern
+   subjects, range patterns, exhaustiveness checking at sema time.
+3. **Witness Variables**: Private ZK inputs support (`witness` keyword).
+4. **Match-as-expression**: surface the matched arm's value to `let` /
+   `return` bindings (currently `match` is statement-level only).
+5. Benchmark suite (criterion) — proving/verification time, proof size.
+6. Prover parallelism optimization (Rayon).
+
+## Relationship to `budlum-core`
+
+`BudZKVM` is the ZK execution environment used by [`budlum-core`][budlum]
+(the Budlum L1) for provable off-chain execution. The two repositories
+are siblings — `budlum-core/Cargo.toml` consumes `bud-isa`, `bud-vm`, and
+`bud-proof` from this workspace via path dependencies:
+
+```toml
+# budlum-core/Cargo.toml
+bud-isa    = { path = "../BudZKVM/bud-isa" }
+bud-vm     = { path = "../BudZKVM/bud-vm" }
+bud-proof  = { path = "../BudZKVM/bud-proof" }
+```
+
+Cross-domain interaction with BudZKVM goes through `budlum-core`'s
+existing `CrossDomainMessage` primitive — there is no bespoke
+L1↔ZKVM bridge protocol. Proof submission is fully permissionless:
+anyone can submit a BudZKVM proof and `budlum-core` verifies it
+natively via `bud_proof` (see `budlum-core/src/prover/mod.rs`).
+
+For more on the L1 side, see the [budlum-core repository][budlum]
+and the [Budlum documentation book][budlum-book].
+
+[budlum]: https://github.com/lubosruler/budlum
+[budlum-book]: https://github.com/lubosruler/budlum/tree/main/docs
 
 ## Verification Status
 
 ```bash
 cargo check --workspace --all-targets     # Clean
 cargo clippy --workspace -- -D warnings   # Clean
-cargo test --workspace                    # 51 passed, 0 failed
+cargo test --workspace                    # 60 passed (51 prover + 9 compiler), 0 failed
+cargo test -p bud-compiler                # 9/9 (3 match + 6 baseline)
 cargo fmt --all -- --check                # Clean
 python3 scripts/check_docs_links.py       # 16 files, all links valid
 ```
