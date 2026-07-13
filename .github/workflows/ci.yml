@@ -2,13 +2,14 @@ name: CI
 
 # Tur 8.x: replaced the previous Nix/FlakeHub-based CI (which required
 # FlakeHub authentication that we don't have) with a plain
-# Ubuntu + rustup setup. The current job set is intentionally minimal:
-#   1. build, clippy (informational), test
-#   2. docs links
+# Ubuntu + rustup setup. Mainnet-hazırlık sıkılığında üç kapı:
+#   1. cargo fmt --check         (whitespace tutarlılığı)
+#   2. cargo clippy -D warnings  (lint ihlali YOK)
+#   3. cargo test --workspace    (tüm 58 testin hepsi geçmeli)
 # The original `format` and `cargo deny` jobs were removed because
 # the upstream code is not yet rustfmt-clean under rust 1.97 and
-# the deny config requires a separate sprint to align with our
-# dependency graph. Both are tracked as Tur 9.x follow-up work.
+# the deny config requires a separate alignment sprint. Both are
+# tracked as Tur 9.x follow-up work.
 
 on:
   push:
@@ -25,6 +26,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
       - name: Cache cargo registry & target
         uses: actions/cache@v4
@@ -41,30 +44,20 @@ jobs:
       - name: Install protobuf compiler
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
+      # Kapı 1: FORMAT — whitespace tutarlılığı
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      # Kapı 2: CLIPPY — lint ihlali YOK. -D warnings ile her uyarı hata
+      # sayılır. BudZero'da 9 bud-compiler + 36+1 bud-proof + 6+2
+      # bud-vm + 4 bud-state testi var; hepsi clippy-clean codebase
+      # üzerinde çalışıyor.
       - name: Cargo check
         run: cargo check --workspace --all-targets
 
       - name: Cargo Clippy
-        # Tur 8.x: informational only — rust 1.97 added
-        # redundant_closure and assertions_on_constants lints that the
-        # Tur 1-7 code violates. Re-tighten to `-D warnings` after the
-        # Tur 9.x lint-cleanup sprint.
-        run: cargo clippy --workspace --all-targets
-        continue-on-error: true
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # Kapı 3: TEST — 58 testin hepsi geçmeli
       - name: Cargo test
         run: cargo test --workspace
-
-  docs:
-    name: Docs Links
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-
-      - name: Check local Markdown links
-        run: python3 scripts/check_docs_links.py

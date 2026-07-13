@@ -194,7 +194,9 @@ impl<'a> Parser<'a> {
             if let Token::Ident(ty) = self.consume() {
                 return_type = Some(ty);
             } else {
-                return Err(CompileError::ParserError("Expected return type".to_string()));
+                return Err(CompileError::ParserError(
+                    "Expected return type".to_string(),
+                ));
             }
         }
 
@@ -460,7 +462,9 @@ impl<'a> Parser<'a> {
             let field = if let Token::Ident(f) = self.consume() {
                 f
             } else {
-                return Err(CompileError::ParserError("Expected field name after dot".to_string()));
+                return Err(CompileError::ParserError(
+                    "Expected field name after dot".to_string(),
+                ));
             };
             expr = Expr::FieldAccess(Box::new(expr), field);
         }
@@ -604,7 +608,9 @@ impl<'a> Parser<'a> {
                         let fname = if let Token::Ident(f) = self.consume() {
                             f
                         } else {
-                            return Err(CompileError::ParserError("Expected struct field name".to_string()));
+                            return Err(CompileError::ParserError(
+                                "Expected struct field name".to_string(),
+                            ));
                         };
                         self.expect(Token::Colon)?;
                         let val = self.parse_expr()?;
