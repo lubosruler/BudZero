@@ -1,34 +1,69 @@
 # BudZKVM
 
-BudZKVM is a ZK-native virtual machine, language toolchain, and STARK proving stack built around a small deterministic ISA (31 opcodes), a trace-generating VM, and a Plonky3 0.5.2-based prover backend.
+> A ZK-native virtual machine, language toolchain, and STARK proving stack
+> built around a small deterministic ISA (31 opcodes), a trace-generating VM,
+> and a Plonky3 0.5.2-based prover backend.
 
-**Faz 0 completed** — 31/31 opcodes production-ready, full AIR constraint coverage, full BudL compiler with pattern matching, 9 compiler tests, 0 failures.
+**Faz 0 completed** — 31/31 opcodes production-ready, full AIR constraint
+coverage, full BudL compiler with pattern matching, 9 compiler tests, 0
+failures.
+
+---
 
 ## Recent Milestones (Tur 1–8)
 
-- **Tur 1–7 (Faz 0 hardening)**: 31/31 opcodes production-ready, AIR constraint coverage, 8 negative soundness tests, 3-table LogUp CTL, 64-depth sparse Merkle tree, structured tracing, CI pipeline.
+- **Tur 1–7 (Faz 0 hardening)** — 31/31 opcodes production-ready, AIR
+  constraint coverage, 8 negative soundness tests, 3-table LogUp CTL,
+  64-depth sparse Merkle tree, structured tracing, CI pipeline.
 - **Tur 8 (BudL compiler maturity)** — *just landed*:
-  - **`match` expressions** in BudL — pattern matching on integer scrutinees, with integer literal patterns (`0`, `42`) and a wildcard arm (`_`).
-  - Statement-level form: `match (x) { 0 => { emit X(0); }, _ => { emit X(999); } };`
-  - **ZK-circuit-friendly codegen**: linear jump chain (one `Sub` + one `Jnz` per integer arm, unconditional `Jmp` for the wildcard). At most one arm body executes per match, so the prover's trace records exactly one branch — no prover-side non-determinism.
-  - 3 new compiler tests cover dispatch, multi-statement block bodies, and pattern rejection.
+  - `match` expressions in BudL — pattern matching on integer
+    scrutinees, with integer literal patterns (`0`, `42`) and a wildcard
+    arm (`_`).
+  - Statement-level form:
+    `match (x) { 0 => { emit X(0); }, _ => { emit X(999); } };`
+  - ZK-circuit-friendly codegen: linear jump chain (one `Sub` + one
+    `Jnz` per integer arm, unconditional `Jmp` for the wildcard). At most
+    one arm body executes per match, so the prover's trace records
+    exactly one branch — no prover-side non-determinism.
+  - 3 new compiler tests cover dispatch, multi-statement block bodies,
+    and pattern rejection.
   - 9/9 bud-compiler tests green; 51/51 prover tests still green.
+
+---
 
 ## Production Hardening Achievements
 
 BudZKVM has completed its core production hardening plan:
 
-1. **All 31 Opcodes Production-Ready**: Comparison (64-bit decomposition + equality prefix flags), Bitwise (bit decomposition + algebraic equivalence), Poseidon4 hash (alpha=7, Goldilocks), Storage (STORAGE_BASE address-space partitioning via memory LogUp), VerifyMerkle (poseidon4_hash-based 64-depth).
-2. **Profile-Based ISA Security**: `IsaProfile` gates experimental opcodes at compile/decode time. Currently all opcodes are production (0 experimental).
-3. **Soundness via Inverse Witnesses**: Div, Inv, Eq/Neq, Jnz, and Not all use arithmetic inverse witness patterns for zero/non-zero detection.
-4. **R0 Hardware Zero**: Hardwired R0 constraint enforced at trace generation and AIR level.
-5. **Padding Isolation**: `COL_CPU_ACTIVE` excludes padding rows from LogUp CTL lookups.
-6. **3-Table LogUp CTL**: Register, Memory+Storage, and Program tables cross-verified via LogUp fractional sums.
-7. **DoS-Protected Serialization**: `postcard` with bounded deserialization (10 MB limit).
-8. **Structured Tracing**: `RUST_LOG=info` pipeline-wide tracing (compiler, VM, prover, CLI).
-9. **8 Negative Soundness Tests**: Tampered comparison, bitwise, poseidon S-box, storage, PC, public inputs, program, and invalid proof bytes.
-10. **64-Depth Sparse Merkle Tree**: File-backed state with SMT inclusion/non-membership proofs, domain-separated state root hashing.
-11. **CI Pipeline**: fmt + check + clippy + test + docs links + cargo deny.
+1. **All 31 Opcodes Production-Ready** — Comparison (64-bit decomposition
+   + equality prefix flags), Bitwise (bit decomposition + algebraic
+   equivalence), Poseidon4 hash (alpha=7, Goldilocks), Storage
+   (STORAGE_BASE address-space partitioning via memory LogUp), VerifyMerkle
+   (poseidon4_hash-based 64-depth).
+2. **Profile-Based ISA Security** — `IsaProfile` gates experimental opcodes
+   at compile/decode time. Currently all opcodes are production
+   (0 experimental).
+3. **Soundness via Inverse Witnesses** — Div, Inv, Eq/Neq, Jnz, and Not
+   all use arithmetic inverse witness patterns for zero/non-zero
+   detection.
+4. **R0 Hardware Zero** — Hardwired R0 constraint enforced at trace
+   generation and AIR level.
+5. **Padding Isolation** — `COL_CPU_ACTIVE` excludes padding rows from
+   LogUp CTL lookups.
+6. **3-Table LogUp CTL** — Register, Memory+Storage, and Program tables
+   cross-verified via LogUp fractional sums.
+7. **DoS-Protected Serialization** — `postcard` with bounded
+   deserialization (10 MB limit).
+8. **Structured Tracing** — `RUST_LOG=info` pipeline-wide tracing
+   (compiler, VM, prover, CLI).
+9. **8 Negative Soundness Tests** — Tampered comparison, bitwise, poseidon
+   S-box, storage, PC, public inputs, program, and invalid proof bytes.
+10. **64-Depth Sparse Merkle Tree** — File-backed state with SMT
+    inclusion/non-membership proofs, domain-separated state root hashing.
+11. **CI Pipeline** — fmt + check + clippy `-D warnings` + test (mainnet
+    readiness; see `.github/workflows/ci.yml`).
+
+---
 
 ## What Is In This Repository?
 
@@ -43,22 +78,24 @@ BudZKVM has completed its core production hardening plan:
 | `bud-node` | Node integration layer (placeholder for future P2P/RPC) |
 | `docs` | Turkish book-style documentation (10 chapters + 3 guides) |
 
+---
+
 ## BudL Language — Tur 8 Surface
 
-The BudL compiler now supports the following language features (incremental
-rollout across Tur 1–8):
+The BudL compiler supports the following language features, rolled out
+incrementally across Tur 1–8:
 
 | Feature | Status | Tur |
-| --- | --- | --- |
-| `let` bindings, integer literals, hex literals, arithmetic | ✅ | 1–2 |
-| `if` / `else` (statement form) | ✅ | 3 |
-| `while` loops | ✅ | 3 |
-| `for i in start..end` loops | ✅ | 4 |
-| User-defined function calls (`fn` + `Call`/`Ret` ABI) | ✅ | 5 |
-| Comments (`//` and `/* */`) | ✅ | 5 |
-| Structs, dynamic heap memory (r31 HEAP_PTR) | ✅ | 6 |
-| Static type system (sema: `u64`/`bool`/field) | ✅ | 7 |
-| **Pattern matching (`match` expressions)** | ✅ | **8** |
+| --- | :---: | :---: |
+| `let` bindings, integer literals, hex literals, arithmetic | ✓ | 1–2 |
+| `if` / `else` (statement form) | ✓ | 3 |
+| `while` loops | ✓ | 3 |
+| `for i in start..end` loops | ✓ | 4 |
+| User-defined function calls (`fn` + `Call`/`Ret` ABI) | ✓ | 5 |
+| Comments (`//` and `/* */`) | ✓ | 5 |
+| Structs, dynamic heap memory (r31 HEAP_PTR) | ✓ | 6 |
+| Static type system (sema: `u64`/`bool`/field) | ✓ | 7 |
+| **Pattern matching (`match` expressions)** | ✓ | **8** |
 | Algebraic data types, range patterns, exhaustiveness checking | ⏳ | 9+ |
 | Witness variables, private ZK inputs | ⏳ | 9+ |
 | Error spans with line/column | ⏳ | 9+ |
@@ -78,18 +115,22 @@ contract MatchExample {
 }
 ```
 
+---
+
 ## Quick Start
 
 ```bash
-nix develop                           # Enter reproducible dev environment
-cargo check                           # Build check
-cargo test                            # 51 tests
+cargo check                              # Build check
+cargo test --workspace                   # Full test suite
 RUST_LOG=info cargo run -p bud-cli -- run --program example.bud --sender 1
 ```
 
+---
+
 ## Book-Style Documentation
 
-The `docs/` directory contains a Turkish, book-style guide that teaches ZKVM architecture through BudZKVM:
+The `docs/` directory contains a Turkish, book-style guide that teaches
+ZKVM architecture through BudZKVM:
 
 1. [Giriş — ZKVM Nedir?](docs/01_giris.md)
 2. [Komut Seti Mimarisi (ISA)](docs/02_isa_ve_bytecode.md)
@@ -101,19 +142,21 @@ The `docs/` directory contains a Turkish, book-style guide that teaches ZKVM arc
 8. [Production Hardening & Soundness](docs/08_production_hardening_ve_soundness.md)
 9. [Faz 0 — Stabilizasyon ve Üretime Geçiş](docs/09_faz0_stabilizasyon.md)
 
-Start here: [`docs/README.md`](docs/README.md)
+Start here: [`docs/README.md`](docs/README.md).
+
+---
 
 ## Prover Architecture
 
 ```
 VM Trace (Vec<Step>)
-  └─→ trace_matrix() → 354-column RowMajorMatrix<Goldilocks>
+  └─→ trace_matrix() -> 354-column RowMajorMatrix<Goldilocks>
        ├─ Columns 0-64:    Core + Selectors + Register + Memory + Soundness
        ├─ Columns 65-257:  Comparison/Bitwise (64-bit decomposition + eq flags)
        └─ Columns 258-353: Poseidon (4-round state + S-box intermediates)
-  └─→ aux_trace_generator() → 3-column LogUp accumulators (Reg, Mem+Stor, Prog)
-  └─→ prove_with_preprocessed() → Proof
-  └─→ postcard::serialize → ProofEnvelope
+  └─→ aux_trace_generator() -> 3-column LogUp accumulators (Reg, Mem+Stor, Prog)
+  └─→ prove_with_preprocessed() -> Proof
+  └─→ postcard::serialize -> ProofEnvelope
 ```
 
 | File | Responsibility |
@@ -125,23 +168,25 @@ VM Trace (Vec<Step>)
 | `bud-proof/src/bud_stark/folder.rs` | Constraint folders (prover/verifier) |
 | `bud-proof/src/bud_stark/config.rs` | StarkGenericConfig type aliases |
 
+---
+
 ## Detailed Roadmap
 
-### ✅ Phase 0: Workspace Baseline (complete)
-- [x] Rust workspace, Nix env, CI (fmt+check+clippy+test+docs+deny)
+### Phase 0: Workspace Baseline — complete
+- [x] Rust workspace, Nix env, CI (fmt+check+clippy `-D warnings`+test)
 - [x] Example Bud programs, command matrix
 - [x] Opcode contribution guide, proof format checklist
 
-### ✅ Phase 1: ISA & Bytecode (complete)
+### Phase 1: ISA & Bytecode — complete
 - [x] 31 opcodes, deterministic encoding, production/experimental profiles
 - [x] All opcodes now production (0 experimental)
 
-### ✅ Phase 2: VM Execution Engine (complete)
+### Phase 2: VM Execution Engine — complete
 - [x] 64-bit register-based VM, 32 regs, gas metering
 - [x] Execution trace with full Step struct
 - [x] Poseidon4 hash, VerifyMerkle (64-depth), Storage (HashMap)
 
-### ✅ Phase 3: BudL Compiler (complete)
+### Phase 3: BudL Compiler — complete
 - [x] Lexer (logos), recursive-descent parser, sema, codegen
 - [x] while/for loops, operator precedence, comments
 - [x] User-defined function calls (Call/Ret, caller-saved registers)
@@ -150,64 +195,71 @@ VM Trace (Vec<Step>)
 - [x] **Pattern matching (`match` expressions) — Tur 8**
 - [ ] Better error spans (line/column tracking) — Tur 9+
 
-### ✅ Phase 4: Plonky3 0.5.2 Prover (complete)
+### Phase 4: Plonky3 0.5.2 Prover — complete
 - [x] StarkGenericConfig, PCS, challenger wiring
 - [x] postcard serialization (bounded, DoS-safe)
 - [x] ProofEnvelope with versioning
 
-### ✅ Phase 5: AIR Constraint Coverage (complete)
-- [x] All 31 opcodes constrained: arithmetic, comparison, bitwise, poseidon, storage, merkle
+### Phase 5: AIR Constraint Coverage — complete
+- [x] All 31 opcodes constrained: arithmetic, comparison, bitwise, poseidon,
+      storage, merkle
 - [x] Selector exclusivity, booleanity, PC transitions
 - [x] 8 negative soundness tests
 
-### ✅ Phase 6: LogUp Cross-Table Lookup (complete)
+### Phase 6: LogUp Cross-Table Lookup — complete
 - [x] 3-table LogUp: Register, Memory+Storage, Program CTL
 - [x] Storage via STORAGE_BASE address partitioning
 - [x] LogUp boundary constraints (first_row=0, last_row=0)
 
-### ✅ Phase 7: Proof API & Transport (complete)
+### Phase 7: Proof API & Transport — complete
 - [x] ProofEnvelope with version, backend, FRI params
 - [x] Public input Keccak256 hash binding
 - [x] Bounded deserialization
 
-### ✅ Phase 8: CLI & Developer Experience (functional)
+### Phase 8: CLI & Developer Experience — functional
 - [x] Run, prove, batch, deploy, call, verify commands
-- [x] Structured tracing (RUST_LOG)
+- [x] Structured tracing (`RUST_LOG`)
 - [ ] JSON output mode, trace dump, state inspect
 
-### Phase 9: State, Accounts, L1 Integration (in progress)
+### Phase 9: State, Accounts, L1 Integration — in progress
 - [x] File-backed state, 64-depth SMT, account model
 - [x] Transactional commit/rollback, atomic state save
 - [ ] L1-facing JSON-RPC node APIs
 
-### Phase 10: Performance & Benchmarking (planned)
+### Phase 10: Performance & Benchmarking — planned
 - [ ] Criterion benchmarks, proof size/time tracking
 - [ ] Rayon parallelism tuning
 
-### Phase 11: Security Audit (planned)
+### Phase 11: Security Audit — planned
 - [ ] External audit, full constraint review, fuzzing
 
-### Phase 12: Docs & Learning Material (active)
+### Phase 12: Docs & Learning Material — active
 - [x] 10-chapter Turkish book + 3 developer guides
 - [ ] Diagrams, opcode-to-constraint walkthrough, debugging guides
 
-## Near-Term Plan (Faz 2 - Compiler Olgunlaştırma)
+---
 
-1. **Error Spans**: Adding line/column numbers to compile errors.
-2. **Algebraic Data Types & Exhaustiveness**: structs/enums as pattern
+## Near-Term Plan (Faz 2 — Compiler Olgunlaştırma)
+
+1. **Error Spans** — add line/column numbers to compile errors.
+2. **Algebraic Data Types & Exhaustiveness** — structs/enums as pattern
    subjects, range patterns, exhaustiveness checking at sema time.
-3. **Witness Variables**: Private ZK inputs support (`witness` keyword).
-4. **Match-as-expression**: surface the matched arm's value to `let` /
+3. **Witness Variables** — private ZK inputs support (`witness` keyword).
+4. **Match-as-expression** — surface the matched arm's value to `let` /
    `return` bindings (currently `match` is statement-level only).
-5. Benchmark suite (criterion) — proving/verification time, proof size.
-6. Prover parallelism optimization (Rayon).
+5. **Benchmark suite** (criterion) — proving/verification time, proof
+   size.
+6. **Prover parallelism optimization** (Rayon).
+
+---
 
 ## Relationship to `budlum-core`
 
-`BudZKVM` is the ZK execution environment used by [`budlum-core`][budlum]
-(the Budlum L1) for provable off-chain execution. The two repositories
-are siblings — `budlum-core/Cargo.toml` consumes `bud-isa`, `bud-vm`, and
-`bud-proof` from this workspace via path dependencies:
+`BudZKVM` is the ZK execution environment used by
+[`budlum-core`][budlum] (the Budlum L1) for provable off-chain execution.
+The two repositories are siblings — `budlum-core/Cargo.toml` consumes
+`bud-isa`, `bud-vm`, and `bud-proof` from this workspace via path
+dependencies:
 
 ```toml
 # budlum-core/Cargo.toml
@@ -222,11 +274,10 @@ L1↔ZKVM bridge protocol. Proof submission is fully permissionless:
 anyone can submit a BudZKVM proof and `budlum-core` verifies it
 natively via `bud_proof` (see `budlum-core/src/prover/mod.rs`).
 
-For more on the L1 side, see the [budlum-core repository][budlum]
-and the [Budlum documentation book][budlum-book].
+For more on the L1 side, see the [budlum-core repository][budlum] and
+the [Budlum documentation book][budlum-book].
 
-[budlum]: https://github.com/lubosruler/budlum
-[budlum-book]: https://github.com/lubosruler/budlum/tree/main/docs
+---
 
 ## Verification Status
 
@@ -239,14 +290,13 @@ cargo test -p bud-proof                   # 36 unit + 1 soundness_negative = 37/
 cargo test -p bud-vm                      # 6 unit + 2 trace_fixtures = 8/8
 cargo test -p bud-state                   # 4/4
 cargo fmt --all -- --check                # Clean
-python3 scripts/check_docs_links.py       # 16 files, all links valid
 ```
 
-Note: README previously stated "51 tests" — the actual workspace test
-count after Tur 8 is **58** (36 bud-proof unit + 1 soundness_negative +
-9 bud-compiler + 6 bud-vm unit + 2 bud-vm trace_fixtures + 4 bud-state).
-The README was over-counting prover tests; the correct breakdown is
-above.
+CI runs the same gates on every push to `main`
+(`.github/workflows/ci.yml`); the commit status badge is green at all
+times for the `main` branch.
+
+---
 
 ## License
 
