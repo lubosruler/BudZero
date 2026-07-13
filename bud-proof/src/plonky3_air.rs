@@ -355,6 +355,20 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // VerifyMerkle: result is boolean (0 or 1)
         // Full Merkle path verification requires multi-round hash constraints;
         // the VM computes the correct result deterministically via poseidon4_hash.
+        //
+        // Tur 10 (security audit Z-B): the constraint below is *not* a
+        // soundness fix. `is_verify_merkle` is a prover-controlled
+        // witness column, so a malicious prover can set it to 0 on every
+        // row (and write whatever `rd_val_new` they want) and the
+        // constraint vacuously passes. The real fix is to *tie* the
+        // `is_verify_merkle` selector to `COL_OPCODE` so it cannot be
+        // freely chosen, and to re-derive the Poseidon path from
+        // witness columns in the AIR. That refactor is deferred to
+        // Tur 10.5 (rolled into the Z-A "bind 48 public inputs to the
+        // trace" AIR overhaul). Until then, this opcode is treated as
+        // "unsound for ZK purposes" — the matching prove tests in
+        // `plonky3_prover.rs` were removed in Tur 10 (see
+        // `verify_merkle_opcode_is_deprecated_for_zk_proofs`).
         builder
             .when(is_verify_merkle.clone())
             .assert_bool(rd_val_new.clone());
@@ -399,6 +413,22 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             .when_transition()
             .when(is_halt.clone())
             .assert_eq(nxt_pc, cur[COL_PC].into());
+
+        // Tur 10 (security audit Z-C): termination constraint.
+        //
+        // The transition 1 -> 0 for `cpu_active` is allowed ONLY on a Halt
+        // row. In normal execution every transition is 1 -> 1; the only
+        // 1 -> 0 transition is the move from the last real step into the
+        // padding (cpu_active = 0, is_halt = 1) zone. By forcing that
+        // transition to land on a row where `is_halt = 1`, we rule out the
+        // "the program was cut short without Halting" attack and pair with
+        // the VM-side guarantee that the last real step is always Halt
+        // (see `Vm::run_receipt`).
+        builder
+            .when_transition()
+            .when(cpu_active.clone())
+            .when(one.clone() - nxt_cpu_active.clone())
+            .assert_zero(one.clone() - is_halt.clone());
 
         // Soundness: Gas consumption checking
         let three = AB::Expr::from(AB::F::from_u64(3));

@@ -121,6 +121,15 @@ impl Vm {
     }
 
     pub fn step(&mut self, program: &[u64]) -> Result<(), VmError> {
+        // Tur 10 (security audit Z-D): semantics of error returns.
+        //
+        // On any error path, `Vm::step` does NOT push a Step to
+        // `self.trace` for the failing instruction. The matching terminal
+        // Halt step is appended by `run_receipt` after the error is
+        // observed, so the trace still ends with a Halt row and the AIR
+        // Z-C termination constraint is satisfied. The set of fields that
+        // `step` is allowed to mutate on error is: `halted` (set to true)
+        // and `error` (set to Some(...)). Do not push partial steps.
         self.registers[0] = 0; // Enforce r0 is always 0
         if self.halted {
             return Ok(());
@@ -499,6 +508,51 @@ impl Vm {
             }
         }
 
+        // Tur 10 (security audit Z-D): when the program terminates with an
+        // error (OutOfGas, StackUnderflow, InvalidMemoryAccess, ...),
+        // `Vm::step` returns before pushing the failing step to `self.trace`.
+        // We still need a terminal row in the trace so that the AIR's
+        // `cpu_active` transition lands on a Halt row, matching the Z-C
+        // termination constraint. Synthesize a synthetic Halt step here.
+        // The synthetic step is byte-identical to a real Halt (pc = current
+        // pc, dst_val = 0, all other fields zeroed / derived from the VM
+        // state) and is *only* appended when the program ended on an error
+        // (i.e. there is no real Halt in the trace yet).
+        if error.is_some() {
+            let last_is_halt = self
+                .trace
+                .last()
+                .map(|s| matches!(s.instruction.opcode, Opcode::Halt))
+                .unwrap_or(false);
+            if !last_is_halt {
+                let cur_pc = self.pc;
+                let inst = Instruction {
+                    opcode: Opcode::Halt,
+                    rd: 0,
+                    rs1: 0,
+                    rs2: 0,
+                    imm: 0,
+                };
+                self.trace.push(Step {
+                    pc: cur_pc,
+                    next_pc: cur_pc,
+                    instruction: inst,
+                    src1_idx: 0,
+                    src2_idx: 0,
+                    dst_idx: 0,
+                    src1_val: 0,
+                    src2_val: 0,
+                    dst_val: 0,
+                    registers: self.registers,
+                    memory_addr: None,
+                    memory_val: None,
+                    is_memory_write: false,
+                    stack_pointer: self.stack.len(),
+                });
+                self.halted = true;
+            }
+        }
+
         let mut sorted_writes = self.state_writes.clone();
         sorted_writes.sort_by_key(|w| w.0);
         let mut bytes = Vec::new();
@@ -758,5 +812,33 @@ mod tests {
         let receipt2 = vm2.run_receipt(&program_store_oob);
         assert!(!receipt2.success);
         assert_eq!(receipt2.error, Some(VmError::InvalidMemoryAccess));
+    }
+
+    /// Tur 10 (security audit Z-D): when the program terminates on an
+    /// error, the trace must still end on a Halt row so that the AIR
+    /// Z-C termination constraint is satisfied. `Vm::step` is allowed
+    /// to return Err *without* pushing the failing step; the synthetic
+    /// terminal Halt step is appended by `run_receipt` instead.
+    #[test]
+    fn error_termination_appends_synthetic_halt_step() {
+        // Jump past the end of the program: pc=0, Jmp 1 → pc=1, which
+        // is out of bounds for a 1-instruction program → InvalidPc.
+        let program = vec![inst(Opcode::Jmp, 0, 0, 0, 1)];
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&program);
+
+        assert!(!receipt.success);
+        assert_eq!(receipt.error, Some(VmError::InvalidPc));
+
+        // The trace must contain the Jmp step + a synthetic terminal
+        // Halt step (the failing InvalidPc step is intentionally not
+        // pushed by `Vm::step`).
+        assert_eq!(vm.trace.len(), 2);
+        assert_eq!(vm.trace[0].instruction.opcode, Opcode::Jmp);
+        assert_eq!(vm.trace[1].instruction.opcode, Opcode::Halt);
+        assert_eq!(vm.trace[1].pc, 1);
+        assert_eq!(vm.trace[1].next_pc, 1);
+        assert_eq!(vm.trace[1].dst_val, 0);
+        assert!(vm.halted);
     }
 }

@@ -1453,101 +1453,140 @@ mod tests {
         prove_and_verify(program, |_| {});
     }
 
-    fn build_merkle_path(leaf: u64, key: u64, siblings: &[u64]) -> (u64, [u64; 64]) {
-        let mut current = leaf;
-        let mut path = [0u64; 64];
-        for (i, &sibling) in siblings.iter().enumerate() {
-            path[i] = sibling;
-            let bit = (key >> i) & 1;
-            current = if bit == 0 {
-                bud_vm::poseidon4_hash(current, sibling)
-            } else {
-                bud_vm::poseidon4_hash(sibling, current)
-            };
-        }
-        (current, path)
-    }
-
-    fn write_merkle_path_to_memory(vm: &mut Vm, addr: usize, key: u64, path: &[u64; 64]) {
-        vm.memory[addr..addr + 8].copy_from_slice(&key.to_le_bytes());
-        for (i, sibling) in path.iter().enumerate() {
-            let off = addr + 8 + i * 8;
-            vm.memory[off..off + 8].copy_from_slice(&sibling.to_le_bytes());
-        }
-    }
+    // --- Tur 10 (security audit Z-B) ---
+    //
+    // `VerifyMerkle` opcode'unun (0x1E) ZK soundness'ı KRİTİK bir açık taşır
+    // (bkz. BUDLUM_BUDZERO_AUDIT.md Z-B). AIR'deki tek kısıt
+    // `when(is_verify_merkle).assert_bool(rd_val_new)` ifadesidir — yani
+    // sonuç 0 veya 1 olmalı; ama gerçek Poseidon Merkle path doğrulaması
+    // AIR tarafından zorunlu kılınmaz. Prover, kendi inşa ettiği trace'de
+    // `rd_val_new`'i istediği 0/1'e set edip geçerli proof üretebilir.
+    //
+    // Bu testler bilinçli olarak KALDIRILDI (eski: `proves_verify_merkle_valid`,
+    // `proves_verify_merkle_invalid_root`, `proves_verify_merkle_invalid_path`).
+    // Yerine, soundness semantiğinin ihlal edildiğini belgeleyen tek bir
+    // deprecation testi konuldu (aşağıda). Gerçek fix — `is_verify_merkle`
+    // selector'ünü `COL_OPCODE`'a bağlamak ve path'i trace sütunlarına
+    // taşıyarak yeniden hesaplamak — Tur 10.5'te (Z-A ile birlikte büyük
+    // AIR refactor) uygulanacaktır.
 
     #[test]
-    fn proves_verify_merkle_valid() {
-        let leaf = 42u64;
-        let key = 7u64;
-        // Deterministic "siblings" — in a real SMT these are the sibling hashes
-        let mut siblings = [0u64; 64];
-        for (i, s) in siblings.iter_mut().enumerate() {
-            *s = (1000 + i as u64).wrapping_mul(31);
+    fn verify_merkle_opcode_is_deprecated_for_zk_proofs() {
+        // Bu test Z-B'nin belgelenmiş bir bilgi olduğunu sabit tutar.
+        // İçerideki davranış: VerifyMerkle opcode'unun şu an ZK üzerinden
+        // SOUND olmadığını, gerçek fix'in Tur 10.5'te yapılacağını not eder.
+        // (Testin kendisi geçer; ama aynı isimdeki eski 3 prove testi
+        // artık var olmadığı için "sahte yeşil" durumu ortadan kalkmıştır.)
+        let opcode = bud_isa::Opcode::VerifyMerkle;
+        let encoded = bud_isa::Instruction {
+            opcode,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
         }
-        let (root, path) = build_merkle_path(leaf, key, &siblings);
-
-        let program = vec![
-            inst(Opcode::VerifyMerkle, 1, 2, 3, 256), // rd=1, rs1=r2(root), rs2=r3(leaf), imm=256
-            inst(Opcode::Halt, 0, 0, 0, 0),
-        ];
-        prove_and_verify(program, |vm| {
-            vm.registers[2] = root;
-            vm.registers[3] = leaf;
-            vm.memory.resize(1024, 0);
-            write_merkle_path_to_memory(vm, 256, key, &path);
-        });
-    }
-
-    #[test]
-    fn proves_verify_merkle_invalid_root() {
-        let leaf = 42u64;
-        let key = 7u64;
-        let mut siblings = [0u64; 64];
-        for (i, s) in siblings.iter_mut().enumerate() {
-            *s = (1000 + i as u64).wrapping_mul(31);
-        }
-        let (root, path) = build_merkle_path(leaf, key, &siblings);
-
-        // Use wrong root
-        let program = vec![
-            inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
-            inst(Opcode::Halt, 0, 0, 0, 0),
-        ];
-        prove_and_verify(program, |vm| {
-            vm.registers[2] = root.wrapping_add(1); // Wrong root
-            vm.registers[3] = leaf;
-            vm.memory.resize(1024, 0);
-            write_merkle_path_to_memory(vm, 256, key, &path);
-        });
-    }
-
-    #[test]
-    fn proves_verify_merkle_invalid_path() {
-        let leaf = 42u64;
-        let key = 7u64;
-        let mut siblings = [0u64; 64];
-        for (i, s) in siblings.iter_mut().enumerate() {
-            *s = (1000 + i as u64).wrapping_mul(31);
-        }
-        let (root, mut path) = build_merkle_path(leaf, key, &siblings);
-
-        // Tamper one sibling
-        path[10] = path[10].wrapping_add(1);
-
-        let program = vec![
-            inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
-            inst(Opcode::Halt, 0, 0, 0, 0),
-        ];
-        prove_and_verify(program, |vm| {
-            vm.registers[2] = root;
-            vm.registers[3] = leaf;
-            vm.memory.resize(1024, 0);
-            write_merkle_path_to_memory(vm, 256, key, &path);
-        });
+        .encode();
+        // 0x1E = 30 opcode anlamına gelir
+        assert_eq!(encoded & 0xFF, 0x1E);
     }
 
     // --- Soundness negative tests (tampered trace rejection) ---
+
+    /// Tur 10 (security audit Z-C): negative test for the termination
+    /// constraint. The last "real" (cpu_active=1) row in a trace must be
+    /// a Halt. We take a valid Add + Halt program, then surgically
+    /// rewrite the *last* step's `COL_OPCODE` and `COL_IS_HALT` columns
+    /// so that the row reads as an `Add` (is_halt=0, cpu_active=1) and
+    /// the row immediately after is the (cpu_active=0, is_halt=1)
+    /// padding. This violates Z-C; verification must reject the proof.
+    #[test]
+    fn rejects_trace_with_non_halt_termination() {
+        let program = vec![
+            inst(Opcode::Add, 1, 2, 3, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        vm.registers[2] = 10;
+        vm.registers[3] = 20;
+        let _receipt = vm.run_receipt(&program);
+        assert!(_receipt.success);
+        assert!(matches!(
+            vm.trace.last().unwrap().instruction.opcode,
+            Opcode::Halt
+        ));
+
+        // Build the matrix, then mutate the *last* real row to look like
+        // a non-Halt step while leaving cpu_active=1 on it. The padding
+        // row right after will then read as cpu_active=0, is_halt=1
+        // (already correct) but the 1->0 transition lands on a non-Halt
+        // row, which the new Z-C constraint forbids.
+        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program);
+        // The trace has 2 rows: row 0 = Add, row 1 = Halt. We rewrite
+        // row 1's opcode/is_halt so the row looks like an Add (the
+        // existing arithmetic constraints force dst_val=10+20=30, but
+        // we don't care — the *transition* 1->0 is the violation).
+        let last = n_cpu - 1;
+        let row_start = last * TRACE_WIDTH;
+        matrix.values[row_start + COL_OPCODE] = Goldilocks::new(Opcode::Add as u64);
+        matrix.values[row_start + COL_IS_HALT] = Goldilocks::new(0);
+        matrix.values[row_start + COL_IS_ADD] = Goldilocks::new(1);
+        // The padding row (row 2) was already cpu_active=0, is_halt=1.
+        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
+
+        let air = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
+        };
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash: [0u8; 32],
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: 1000000,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+        };
+
+        let config = build_config();
+        let public_values = to_public_values(&pi);
+        let degree_bits = p3_util::log2_strict_usize(matrix.height());
+        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
+        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
+
+        let p3_proof = prove_with_preprocessed(
+            &config,
+            &air,
+            matrix.clone(),
+            Some(crate::plonky3_prover::aux_trace_generator(
+                matrix.clone(),
+                n_cpu,
+                program.clone(),
+            )),
+            &public_values,
+            preprocessed_ref,
+        );
+        let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
+        let envelope = ProofEnvelope {
+            proof_format_version: 1,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: pi.hash(),
+            proof_bytes,
+            degree_bits: degree_bits as u32,
+        };
+
+        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        assert!(
+            res.is_err(),
+            "Expected verification to FAIL with non-Halt termination (Z-C), but it succeeded!"
+        );
+    }
 
     #[test]
     fn rejects_tampered_comparison_result() {

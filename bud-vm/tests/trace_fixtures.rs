@@ -224,6 +224,25 @@ fn control_flow_trace_fixture_stays_stable() {
                 dst_val: 0,
                 registers: &[(2, 22), (3, 0)],
             },
+            // Tur 10 (security audit Z-D): the Jmp at pc=4 jumps to pc=6,
+            // which is past `program.len()`. `Vm::step` returns
+            // `InvalidPc` without pushing a Step, so `run_receipt`
+            // appends a synthetic Halt step (pc=6, next_pc=6) so the
+            // trace ends on a Halt row and the AIR Z-C termination
+            // constraint is satisfied.
+            ExpectedStep {
+                pc: 6,
+                next_pc: 6,
+                opcode: Opcode::Halt,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+                src1_val: 0,
+                src2_val: 0,
+                dst_val: 0,
+                registers: &[(2, 22), (3, 0)],
+            },
         ],
     );
     assert_eq!(vm.pc, 6);
