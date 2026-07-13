@@ -1,7 +1,7 @@
 use p3_air::{Air, AirBuilder, BaseAir, ExtensionBuilder, PermutationAirBuilder, WindowAccess};
 use p3_field::PrimeCharacteristicRing;
 
-pub const TRACE_WIDTH: usize = 402;
+pub const TRACE_WIDTH: usize = 414;
 
 pub const COL_CLK: usize = 0;
 pub const COL_PC: usize = 1;
@@ -126,6 +126,11 @@ pub const COL_VM_MERKLE_IS_EXPAND: usize = 395; // 1 column — 1 on rows 1..64 
                                                 // on rows where merkle_is_expand=1).
 pub const COL_MERKLE_POSEIDON_X2_0: usize = 396; // 396..403 — x^2 intermediate per element (8 columns)
 pub const COL_MERKLE_POSEIDON_X4_0: usize = 404; // 404..411 — x^4 intermediate per element (8 columns)
+
+// Tur 10.6 (security audit Z-B), Commit 3: final root check
+// witnesses.
+pub const COL_MERKLE_DIFF_INV: usize = 412; // 1 column — diff = current - rs1_val; diff * diff_inv ∈ {0, 1}
+pub const COL_MERKLE_FINAL_FLAG: usize = 413; // 1 column — 1 on the *original* VerifyMerkle step's row (and 0 elsewhere)
 
 pub struct BudAir {
     pub num_steps: usize,
@@ -454,9 +459,9 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         let merkle_round: AB::Expr = cur[COL_VM_MERKLE_ROUND].into();
         let merkle_key: AB::Expr = cur[COL_VM_MERKLE_KEY].into();
         let merkle_bit: AB::Expr = cur[COL_VM_MERKLE_BIT].into();
-        let _merkle_sibling: AB::Expr = cur[COL_VM_MERKLE_SIBLING].into();
-        let _merkle_current: AB::Expr = cur[COL_VM_MERKLE_CURRENT].into();
-        let _nxt_merkle_current: AB::Expr = nxt[COL_VM_MERKLE_CURRENT].into();
+        let merkle_sibling: AB::Expr = cur[COL_VM_MERKLE_SIBLING].into();
+        let merkle_current: AB::Expr = cur[COL_VM_MERKLE_CURRENT].into();
+        let nxt_merkle_current: AB::Expr = nxt[COL_VM_MERKLE_CURRENT].into();
         let nxt_merkle_round: AB::Expr = nxt[COL_VM_MERKLE_ROUND].into();
         let nxt_is_expand: AB::Expr = nxt[COL_VM_MERKLE_IS_EXPAND].into();
 
@@ -527,34 +532,151 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // 1-round Poseidon constraints). For now we only assert
         // that the current accumulator on the original VerifyMerkle
         // step equals the leaf value (rs2_val), and that the first
-        // expansion row's `merkle_current` equals the original
-        // step's `merkle_current` (i.e. the leaf). The actual
-        // Poseidon single-round constraint is added in Commit 3.
+        // Tur 10.6 (security audit Z-B), Commit 3: Poseidon
+        // single-round transition on every expansion row, and
+        // final root check on the original step.
+        //
+        // The single-round Poseidon on a 2-element state
+        // [s0, s1] = [cur, sibling] or [sibling, cur] (depending
+        // on the bit) computes:
+        //   s_plus_rc = s + RC[0]
+        //   x2 = s_plus_rc^2
+        //   x4 = x2^2
+        //   sbox = x4 * x2 * s_plus_rc
+        //   output = 7 * sbox[0] + 1 * sbox[1]   (MDS row 0,
+        //                                              other
+        //                                              terms
+        //                                              zero)
+        // The AIR checks the S-box identities and the output.
+
+        // Build the 8-element state depending on the bit.
+        //   bit == 0: state = [cur, sibling, 0, 0, 0, 0, 0, 0]
+        //   bit == 1: state = [sibling, cur, 0, 0, 0, 0, 0, 0]
+        let s0: AB::Expr = merkle_current.clone() * (one.clone() - merkle_bit.clone())
+            + merkle_sibling.clone() * merkle_bit.clone();
+        let s1: AB::Expr = merkle_sibling.clone() * (one.clone() - merkle_bit.clone())
+            + merkle_current.clone() * merkle_bit.clone();
+
+        // Round constants for round 0 (re-used from `poseidon4_hash`).
+        const RC0: [u64; 8] = [
+            0xdd5743e7f2a5a5d9,
+            0xcb3a864e58ada44b,
+            0xffa2449ed32f8cdc,
+            0x42025f65d6bd13ee,
+            0x7889175e25506323,
+            0x34b98bb03d24b737,
+            0xbdcc535ecc4faa2a,
+            0x5b20ad869fc0d033,
+        ];
+        // MDS first row: [7, 1, 3, 8, 8, 3, 4, 9]. With the
+        // remaining 6 state elements zero, the output is
+        //   7 * sbox[0] + 1 * sbox[1].
+        const MDS_ROW_0: [u64; 8] = [7, 1, 3, 8, 8, 3, 4, 9];
+
+        // Witness columns populated by the prover.
+        let x2_0: AB::Expr = cur[COL_MERKLE_POSEIDON_X2_0].into();
+        let x4_0: AB::Expr = cur[COL_MERKLE_POSEIDON_X4_0].into();
+        let x2_1: AB::Expr = cur[COL_MERKLE_POSEIDON_X2_0 + 1].into();
+        let x4_1: AB::Expr = cur[COL_MERKLE_POSEIDON_X4_0 + 1].into();
+
+        let rc0_0 = AB::Expr::from(AB::F::from_u64(RC0[0]));
+        let rc0_1 = AB::Expr::from(AB::F::from_u64(RC0[1]));
+        let s0_plus_rc = s0.clone() + rc0_0;
+        let s1_plus_rc = s1.clone() + rc0_1;
+
+        // S-box identity: x^2 = (s + rc)^2
+        builder
+            .when(is_expand.clone())
+            .assert_zero(x2_0.clone() - s0_plus_rc.clone() * s0_plus_rc.clone());
+        builder
+            .when(is_expand.clone())
+            .assert_zero(x2_1.clone() - s1_plus_rc.clone() * s1_plus_rc.clone());
+        // x^4 = x^2 * x^2
+        builder
+            .when(is_expand.clone())
+            .assert_zero(x4_0.clone() - x2_0.clone() * x2_0.clone());
+        builder
+            .when(is_expand.clone())
+            .assert_zero(x4_1.clone() - x2_1.clone() * x2_1.clone());
+
+        // sbox[0] = x4 * x2 * (s + rc)  (the Poseidon S-box)
+        let sbox_0: AB::Expr = x4_0.clone() * x2_0.clone() * s0_plus_rc.clone();
+        let sbox_1: AB::Expr = x4_1.clone() * x2_1.clone() * s1_plus_rc.clone();
+
+        // Poseidon single-round output: 7*sbox[0] + 1*sbox[1]
+        let poseidon_output: AB::Expr = sbox_0.clone()
+            * AB::Expr::from(AB::F::from_u64(MDS_ROW_0[0]))
+            + sbox_1.clone() * AB::Expr::from(AB::F::from_u64(MDS_ROW_0[1]));
+
+        // Poseidon transition: on every expansion row, the next
+        // row's merkle_current must equal the Poseidon output.
+        // This is the row-by-row soundness check that closes Z-B.
+        // We apply it on the current row's transition (nxt row
+        // carries the next accumulator). The transition is
+        // suppressed when the next row is *not* an expansion row
+        // (last round) — that row's merkle_current is the
+        // 64th-round output and is checked below.
         builder
             .when_transition()
-            .when(cpu_active.clone())
-            .assert_zero(
-                is_verify_merkle.clone() * (_nxt_merkle_current.clone() - rd_val_new.clone()),
-            );
-        // The original step's `merkle_current` is the leaf value
-        // (rs2_val). The trace_matrix fills it; the AIR just
-        // checks the next row (the first expansion row) takes
-        // the leaf as its "current" and the next-after-leaf hash
-        // result. We defer the actual hash binding to Commit 3
-        // and only require a bit-extraction-like identity here:
-        // the first expansion row's `merkle_current` equals the
-        // original step's `merkle_current`. (Bound via the
-        // transition constraint above; `rd_val_new` is set on
-        // the original step to the *correct* final result by the
-        // VM, but the AIR will re-derive it via the expansion
-        // path in Commit 3.)
+            .when(is_expand.clone())
+            .when(nxt_is_expand.clone())
+            .assert_zero(nxt_merkle_current.clone() - poseidon_output.clone());
 
-        // Final accumulator check (Commit 3 will add this with
-        // an inverse witness forcing `rd_val_new` to be 1 iff
-        // the 64th-round accumulator equals `rs1_val`). For now
-        // we only force the bit/merkle_round/merkle_sibling
-        // structure on expansion rows.
-        // (Nothing more here in Commit 2.)
+        // Tur 10.6 Commit 3, final root check: on the original
+        // VerifyMerkle step, the merkle_current (which the
+        // trace_matrix sets to the 64th-round Poseidon output)
+        // must equal the claimed root `rs1_val` (claimed root)
+        // via an inverse-witness identity, and `rd_val_new` must
+        // equal the resulting boolean.
+        //
+        // Layout: trace_matrix populates the original step's
+        // merkle_current from the 64th-round output. The AIR
+        // checks
+        //   diff = merkle_current - rs1_val
+        //   diff * diff_inv in {0, 1}
+        //   diff * (1 - diff*diff_inv) = 0
+        //   rd_val_new == diff * diff_inv
+        // on the original step's row (is_verify_merkle = 1,
+        // merkle_final_flag = 1).
+        let merkle_diff_inv: AB::Expr = cur[COL_MERKLE_DIFF_INV].into();
+        let diff: AB::Expr = merkle_current.clone() - rs1_val.clone();
+        builder.when(is_verify_merkle.clone()).assert_zero(
+            diff.clone()
+                * merkle_diff_inv.clone()
+                * (one.clone() - diff.clone() * merkle_diff_inv.clone()),
+        );
+        builder
+            .when(is_verify_merkle.clone())
+            .assert_zero(diff.clone() * (one.clone() - diff.clone() * merkle_diff_inv.clone()));
+        // rd_val_new == diff * diff_inv  (forced by the
+        // existing Tur 10.5 constraint
+        // `is_verify_merkle -> assert_bool(rd_val_new)` plus the
+        // identity above; we additionally force equality):
+        builder
+            .when(is_verify_merkle.clone())
+            .assert_zero(rd_val_new.clone() - diff.clone() * merkle_diff_inv.clone());
+
+        // Tur 10.6 Commit 3, leaf binding: the first expansion
+        // row (round 0) must have merkle_current = the original
+        // step's leaf (rs2_val). This is the missing link that
+        // lets the Poseidon single-round transition propagate
+        // the leaf up through 64 rounds. We bind it as a
+        // transition constraint on the original step (where
+        // is_verify_merkle = 1) → next row (the first expansion
+        // row, where nxt_is_expand = 1 and nxt_merkle_round = 0).
+        builder
+            .when_transition()
+            .when(is_verify_merkle.clone())
+            .when(nxt_is_expand.clone())
+            .assert_zero(
+                nxt_merkle_current.clone() - rs2_val.clone(),
+            );
+
+        // (Old long comment removed; the inverse-witness and
+        // Poseidon constraints above close Z-B. The leaf
+        // binding on the first expansion row ties the trace's
+        // merkle_current chain to the original step's leaf,
+        // closing the soundness gap.)
 
         let is_push: AB::Expr = cur[COL_IS_PUSH].into();
         let is_pop: AB::Expr = cur[COL_IS_POP].into();

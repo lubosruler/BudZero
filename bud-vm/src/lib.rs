@@ -584,6 +584,16 @@ impl Vm {
                         merkle_is_expand: true,
                     });
                 }
+                // Tur 10.6 Commit 3: patch the original step's
+                // merkle_current to the 64th-round Poseidon
+                // output. This bridges the 64 expansion rows to
+                // the original step, allowing the AIR to apply
+                // the final root check on the original step's
+                // row (is_verify_merkle = 1, merkle_final_flag = 1).
+                let orig_idx = self.trace.len() - 1 - 64;
+                if orig_idx < self.trace.len() {
+                    self.trace[orig_idx].merkle_current = Some(current);
+                }
             }
         }
 
