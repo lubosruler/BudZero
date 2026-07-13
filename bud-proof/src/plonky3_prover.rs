@@ -666,6 +666,17 @@ fn trace_matrix(
             values[row_start + COL_NEXT_PC] = Goldilocks::new(last_pc);
             values[row_start + COL_STACK_PTR] =
                 Goldilocks::new(trace[n_cpu - 1].stack_pointer as u64);
+            // Tur 12.9: carry event_digest (and other accumulators) into
+            // padding so the active→padding transition does not zero them.
+            let last_start = (n_cpu - 1) * TRACE_WIDTH;
+            for j in 0..8 {
+                values[row_start + COL_EVENT_DIGEST_0 + j] =
+                    values[last_start + COL_EVENT_DIGEST_0 + j];
+                values[row_start + COL_FINAL_ROOT_0 + j] =
+                    values[last_start + COL_FINAL_ROOT_0 + j];
+            }
+            values[row_start + COL_EXIT_CODE] = values[last_start + COL_EXIT_CODE];
+            values[row_start + COL_TRACE_LEN_CTR] = values[last_start + COL_TRACE_LEN_CTR];
         }
         values[row_start + COL_GAS_USED] = Goldilocks::new(running_gas);
         values[row_start + COL_RAW_INST] = Goldilocks::new(
@@ -1280,6 +1291,49 @@ mod tests {
             res.is_err(),
             "Expected verification to FAIL after tampering, but it succeeded!"
         );
+    }
+
+    /// Tur 12.9: Log updates event_digest; public inputs must carry limb0=sum.
+    #[test]
+    fn proves_log_event_digest() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Log, 0, 1, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(receipt.events, vec![7]);
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&inst| inst.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let mut event_digest = [0u8; 32];
+        event_digest[0..4].copy_from_slice(&7u32.to_le_bytes());
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: vm.context.sender,
+            nonce: vm.context.nonce,
+            block_height: vm.context.block_height,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest,
+        };
+        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
+        assert!(Plonky3Adapter::verify(&envelope, &pi, &program).is_ok());
     }
 
     #[test]

@@ -849,46 +849,23 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 .assert_zero(cur[COL_EVENT_DIGEST_0 + j].into() - public_inputs[40 + j].into());
         }
 
-        // (5b) event_digest transition: for every active row, the
-        // next row's COL_EVENT_DIGEST limb 0 must equal either
-        //   - the current value (no Log on this row), or
-        //   - the current value + rs1_val mod 2^32 (Log on this row).
-        // All other limbs must stay equal across the transition.
+        // (5b) event_digest transition (Tur 12.9 fix):
+        // Prover writes the updated accumulator ON the Log row itself
+        // (copy prev, then += log val). Therefore the constraint must
+        // use the *next* row's Log flag and rs1 value:
+        //   digest[i+1] = digest[i] + is_log[i+1] * rs1[i+1]
+        // The previous formulation used cur is_log/rs1, which forced
+        // digest to update one row late and rejected every Log program
+        // (InvalidProof) — that also broke budlum's CI pin rebind.
         {
             let nxt_event_0: AB::Expr = nxt[COL_EVENT_DIGEST_0].into();
             let cur_event_0: AB::Expr = cur[COL_EVENT_DIGEST_0].into();
-            let is_log: AB::Expr = is_log.clone();
-            // nxt_event_0 == cur_event_0 + is_log * rs1_val
-            // (we trust that rs1_val & 0xFFFFFFFF = rs1_val below 2^32,
-            // which is what Goldilocks naturally preserves).
-            let two32 = AB::Expr::from(AB::F::from_u64(1u64 << 32));
-            // mod 2^32: subtract two32 if the value crosses the boundary.
-            // Equivalently, the *additive* constraint plus a low-32-bit
-            // check is what we want. We approximate with `(nxt - cur -
-            // is_log * rs1_val) * (1 - 2^32*n) == 0` where n is 0 or 1.
-            // Simpler: assert the *difference* is 0 OR 2^32, and that
-            // the result fits in 32 bits when reduced. We instead
-            // assert that the new value is bounded by 2^32 and the
-            // difference is correct modulo 2^32. To keep this simple
-            // and sound for the small values that real traces produce,
-            // we use the constraint `nxt_event_0 == cur_event_0 +
-            // is_log * rs1_val` and additionally bound COL_EVENT_DIGEST_0
-            // to a 32-bit value. The prover MUST populate the column
-            // with the correct low-32-bit value; if it lies, the
-            // transition fails because the "no Log" rows see a change
-            // in COL_EVENT_DIGEST_0.
-            //
-            // Note: this is not a *perfect* 2^32 modular check (it
-            // would require a 32-bit witness plus a range proof), but
-            // combined with the last-row binding to public_inputs[40],
-            // it forces the prover to record the correct accumulator.
-            // For the *soundness* of the public-input binding, the
-            // last-row check is what matters.
-            let _ = two32; // suppress unused warning for now
+            let nxt_is_log: AB::Expr = nxt[COL_IS_LOG].into();
+            let nxt_rs1: AB::Expr = nxt[COL_RS1_VAL].into();
             builder
                 .when_transition()
                 .when(cpu_active.clone())
-                .assert_zero(nxt_event_0 - cur_event_0 - is_log * rs1_val.clone());
+                .assert_zero(nxt_event_0 - cur_event_0 - nxt_is_log * nxt_rs1);
             // Bounds check: COL_EVENT_DIGEST_0 < 2^32 — too expensive
             // to do as a range proof; we instead require that the
             // first column never carries a bit beyond the 32nd. This
