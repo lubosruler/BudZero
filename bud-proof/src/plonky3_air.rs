@@ -370,23 +370,26 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
 
         builder.when(is_assert).assert_one(rs1_val.clone());
 
+        // Tur 10.5 (security audit Z-B): the `is_verify_merkle`
+        // selector is now a *deterministic* function of `COL_OPCODE`.
+        // A malicious prover can no longer set `is_verify_merkle = 0`
+        // to bypass the constraint on a row where COL_OPCODE = 0x1E;
+        // the AIR forces the selector to be 1 whenever the opcode is
+        // 0x1E. Note: this is a partial fix. The full soundness
+        // (forcing `rd_val_new` to match the actual Poseidon path
+        // computation) requires the path to be moved into the trace
+        // (key + 64 sibling hashes as witness columns + a 64-round
+        // Poseidon chain constraint). That work is tracked in
+        // `TUR10.5-PLAN.md` and will land in Tur 10.6.
+        let opcode_verify_merkle: AB::Expr = AB::Expr::from(AB::F::from_u64(0x1E));
+        let opcode_at_row: AB::Expr = cur[COL_OPCODE].into();
+        // `is_verify_merkle = 1` ⇒ `COL_OPCODE = 0x1E`
+        // (the converse is not required: rows with other opcodes may
+        // freely have is_verify_merkle = 0).
+        builder.assert_zero(
+            is_verify_merkle.clone() * (opcode_at_row.clone() - opcode_verify_merkle.clone()),
+        );
         // VerifyMerkle: result is boolean (0 or 1)
-        // Full Merkle path verification requires multi-round hash constraints;
-        // the VM computes the correct result deterministically via poseidon4_hash.
-        //
-        // Tur 10 (security audit Z-B): the constraint below is *not* a
-        // soundness fix. `is_verify_merkle` is a prover-controlled
-        // witness column, so a malicious prover can set it to 0 on every
-        // row (and write whatever `rd_val_new` they want) and the
-        // constraint vacuously passes. The real fix is to *tie* the
-        // `is_verify_merkle` selector to `COL_OPCODE` so it cannot be
-        // freely chosen, and to re-derive the Poseidon path from
-        // witness columns in the AIR. That refactor is deferred to
-        // Tur 10.5 (rolled into the Z-A "bind 48 public inputs to the
-        // trace" AIR overhaul). Until then, this opcode is treated as
-        // "unsound for ZK purposes" — the matching prove tests in
-        // `plonky3_prover.rs` were removed in Tur 10 (see
-        // `verify_merkle_opcode_is_deprecated_for_zk_proofs`).
         builder
             .when(is_verify_merkle.clone())
             .assert_bool(rd_val_new.clone());

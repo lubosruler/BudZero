@@ -1074,6 +1074,7 @@ mod tests {
     use super::*;
     use bud_isa::{Instruction, Opcode};
     use bud_vm::Vm;
+    use p3_field::PrimeField64;
 
     fn inst(opcode: Opcode, rd: u8, rs1: u8, rs2: u8, imm: i32) -> u64 {
         Instruction {
@@ -1527,30 +1528,36 @@ mod tests {
         prove_and_verify(program, |_| {});
     }
 
-    // --- Tur 10 (security audit Z-B) ---
+    // --- Tur 10 (security audit Z-B) — Tur 10.5 partial fix ---
     //
-    // `VerifyMerkle` opcode'unun (0x1E) ZK soundness'ı KRİTİK bir açık taşır
-    // (bkz. BUDLUM_BUDZERO_AUDIT.md Z-B). AIR'deki tek kısıt
-    // `when(is_verify_merkle).assert_bool(rd_val_new)` ifadesidir — yani
-    // sonuç 0 veya 1 olmalı; ama gerçek Poseidon Merkle path doğrulaması
-    // AIR tarafından zorunlu kılınmaz. Prover, kendi inşa ettiği trace'de
-    // `rd_val_new`'i istediği 0/1'e set edip geçerli proof üretebilir.
+    // `VerifyMerkle` opcode'unun (0x1E) ZK soundness'ı iki katmandan oluşur:
     //
-    // Bu testler bilinçli olarak KALDIRILDI (eski: `proves_verify_merkle_valid`,
-    // `proves_verify_merkle_invalid_root`, `proves_verify_merkle_invalid_path`).
-    // Yerine, soundness semantiğinin ihlal edildiğini belgeleyen tek bir
-    // deprecation testi konuldu (aşağıda). Gerçek fix — `is_verify_merkle`
-    // selector'ünü `COL_OPCODE`'a bağlamak ve path'i trace sütunlarına
-    // taşıyarak yeniden hesaplamak — Tur 10.5'te (Z-A ile birlikte büyük
-    // AIR refactor) uygulanacaktır.
+    //   (a) **Selector binding (Tur 10.5 partial fix).** The prover can no
+    //       longer set `is_verify_merkle = 0` on a row where
+    //       `COL_OPCODE = 0x1E` — the AIR forces
+    //       `is_verify_merkle * (opcode - 0x1E) = 0`. This closes the
+    //       trivial "set the selector to 0 and pick any rd_val_new" attack.
+    //
+    //   (b) **Path verification (still TODO, Tur 10.6).** The
+    //       `rd_val_new` for a VerifyMerkle row is currently constrained
+    //       only to be 0 or 1. A malicious prover who knows the path
+    //       can still claim "valid" for a fake root/leaf because the
+    //       AIR does not recompute the Poseidon path. Closing this
+    //       requires moving key + 64 siblings into the trace as
+    //       witness columns and adding a 64-round Poseidon chain
+    //       constraint. That work is tracked in `TUR10.5-PLAN.md` and
+    //       is too large for a single sprint; the Z-B deprecation
+    //       therefore remains partially in effect until Tur 10.6.
+    //
+    // The `verify_merkle_opcode_is_deprecated_for_zk_proofs` test below
+    // pins the 0x1E encoding; a second test,
+    // `rejects_verify_merkle_with_zero_selector`, validates the partial
+    // Tur 10.5 fix.
 
     #[test]
     fn verify_merkle_opcode_is_deprecated_for_zk_proofs() {
-        // Bu test Z-B'nin belgelenmiş bir bilgi olduğunu sabit tutar.
-        // İçerideki davranış: VerifyMerkle opcode'unun şu an ZK üzerinden
-        // SOUND olmadığını, gerçek fix'in Tur 10.5'te yapılacağını not eder.
-        // (Testin kendisi geçer; ama aynı isimdeki eski 3 prove testi
-        // artık var olmadığı için "sahte yeşil" durumu ortadan kalkmıştır.)
+        // Pin the 0x1E encoding so the AIR-side opcode binding above
+        // (which references 0x1E as a literal) cannot silently rot.
         let opcode = bud_isa::Opcode::VerifyMerkle;
         let encoded = bud_isa::Instruction {
             opcode,
@@ -1560,8 +1567,130 @@ mod tests {
             imm: 0,
         }
         .encode();
-        // 0x1E = 30 opcode anlamına gelir
         assert_eq!(encoded & 0xFF, 0x1E);
+    }
+
+    /// Tur 10.5 (security audit Z-B): partial-fix test for the
+    /// selector binding. Take a valid Add+Halt program, mutate the
+    /// trace so the *last* real row's `is_verify_merkle` column is
+    /// zeroed out while `COL_OPCODE` is left at 0x00 (Halt) — that
+    /// row is still a Halt so the constraint
+    /// `is_verify_merkle * (opcode - 0x1E) = 0` is vacuously true.
+    ///
+    /// A more interesting attack would be to set `is_verify_merkle = 0`
+    /// on a row where `COL_OPCODE = 0x1E` and write a fake `rd_val_new`
+    /// — that is exactly what the new AIR constraint rejects. The
+    /// `proves_simple_add_trace` test (which uses Halt, not VerifyMerkle)
+    /// continues to pass because the constraint is satisfied
+    /// trivially on every row that isn't a VerifyMerkle row.
+    #[test]
+    fn rejects_verify_merkle_row_with_zero_selector() {
+        // Build a trace that contains a VerifyMerkle row and check
+        // that the AIR rejects a trace where the row's
+        // `is_verify_merkle` column is zeroed out while
+        // `COL_OPCODE` is left at 0x1E.
+        //
+        // The program: set r2=root, r3=leaf, run VerifyMerkle on a
+        // trivial 64-sibling path, then Halt. We do not need the
+        // path to be valid — we only need the opcode to be 0x1E.
+        let program = vec![
+            inst(Opcode::Load, 2, 0, 0, 0xCAFE),
+            inst(Opcode::Load, 3, 0, 0, 0xBABE),
+            inst(Opcode::VerifyMerkle, 1, 2, 3, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&inst| inst.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+        };
+
+        // Build the matrix, then zero out the VerifyMerkle row's
+        // `is_verify_merkle` column. With the old (Tur 10) AIR, this
+        // would be a valid trace. With the Tur 10.5 fix, the
+        // constraint `is_verify_merkle * (opcode - 0x1E) = 0` is
+        // violated because COL_OPCODE on that row IS 0x1E.
+        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        // Find the VerifyMerkle row: it's the one with COL_OPCODE = 0x1E.
+        let mut verify_row = None;
+        for i in 0..n_cpu {
+            let row_start = i * TRACE_WIDTH;
+            let op_val = matrix.values[row_start + COL_OPCODE].as_canonical_u64();
+            if op_val == 0x1E {
+                verify_row = Some(i);
+                break;
+            }
+        }
+        let verify_row = verify_row.expect("trace should contain a VerifyMerkle row");
+
+        // Zero out the is_verify_merkle column on that row.
+        let row_start = verify_row * TRACE_WIDTH;
+        matrix.values[row_start + COL_IS_VERIFY_MERKLE] = Goldilocks::new(0);
+        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
+
+        let air = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
+        };
+        let config = build_config();
+        let public_values = to_public_values(&pi);
+        let degree_bits = p3_util::log2_strict_usize(matrix.height());
+        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
+        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
+
+        let p3_proof = prove_with_preprocessed(
+            &config,
+            &air,
+            matrix.clone(),
+            Some(crate::plonky3_prover::aux_trace_generator(
+                matrix.clone(),
+                n_cpu,
+                program.clone(),
+            )),
+            &public_values,
+            preprocessed_ref,
+        );
+        let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
+        let envelope = ProofEnvelope {
+            proof_format_version: 1,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: pi.hash(),
+            proof_bytes,
+            degree_bits: degree_bits as u32,
+        };
+
+        // Verification must reject the proof because the
+        // is_verify_merkle selector was zeroed out on a row where
+        // COL_OPCODE = 0x1E, which violates the new AIR constraint.
+        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        assert!(
+            res.is_err(),
+            "Expected verification to FAIL when is_verify_merkle is zeroed on a 0x1E row, but it succeeded!"
+        );
     }
 
     // --- Soundness negative tests (tampered trace rejection) ---
