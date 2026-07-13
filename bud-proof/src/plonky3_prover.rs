@@ -1926,19 +1926,19 @@ mod tests {
         let siblings: [u64; 64] = std::array::from_fn(|i| ((i as u64) * 31) + 1);
         let leaf: u64 = 0xBEEF;
         let mut current = leaf;
-        for i in 0..64 {
+        for (i, &sibling) in siblings.iter().enumerate() {
             let bit = (key >> i) & 1;
             current = if bit == 0 {
-                bud_vm::poseidon4_hash(current, siblings[i])
+                bud_vm::poseidon4_hash(current, sibling)
             } else {
-                bud_vm::poseidon4_hash(siblings[i], current)
+                bud_vm::poseidon4_hash(sibling, current)
             };
         }
         let root = current;
         vm.memory[256..264].copy_from_slice(&key.to_le_bytes());
-        for i in 0..64 {
+        for (i, &sibling) in siblings.iter().enumerate() {
             let off = 264 + i * 8;
-            vm.memory[off..off + 8].copy_from_slice(&siblings[i].to_le_bytes());
+            vm.memory[off..off + 8].copy_from_slice(&sibling.to_le_bytes());
         }
         vm.registers[2] = root;
         vm.registers[3] = leaf;
@@ -2000,19 +2000,19 @@ mod tests {
         let siblings: [u64; 64] = std::array::from_fn(|i| ((i as u64) * 31) + 1);
         let leaf: u64 = 0xBEEF;
         let mut current = leaf;
-        for i in 0..64 {
+        for (i, &sibling) in siblings.iter().enumerate() {
             let bit = (key >> i) & 1;
             current = if bit == 0 {
-                bud_vm::poseidon4_hash(current, siblings[i])
+                bud_vm::poseidon4_hash(current, sibling)
             } else {
-                bud_vm::poseidon4_hash(siblings[i], current)
+                bud_vm::poseidon4_hash(sibling, current)
             };
         }
         let root = current;
         vm.memory[256..264].copy_from_slice(&key.to_le_bytes());
-        for i in 0..64 {
+        for (i, &sibling) in siblings.iter().enumerate() {
             let off = 264 + i * 8;
-            vm.memory[off..off + 8].copy_from_slice(&siblings[i].to_le_bytes());
+            vm.memory[off..off + 8].copy_from_slice(&sibling.to_le_bytes());
         }
         vm.registers[2] = root;
         vm.registers[3] = leaf;
@@ -2054,7 +2054,7 @@ mod tests {
         // instead tamper the original step's merkle_current
         // (row 0): we change it to (root + 1) so the inverse
         // witness on the original step's row fails.
-        let row_0 = 0 * TRACE_WIDTH;
+        let row_0 = 0; // base offset of trace row 0
         let new_root = root.wrapping_add(1);
         matrix.values[row_0 + COL_VM_MERKLE_CURRENT] = Goldilocks::new(new_root);
         let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
@@ -2114,19 +2114,19 @@ mod tests {
         let siblings: [u64; 64] = std::array::from_fn(|i| ((i as u64) * 31) + 1);
         let leaf: u64 = 0xBEEF;
         let mut current = leaf;
-        for i in 0..64 {
+        for (i, &sibling) in siblings.iter().enumerate() {
             let bit = (key >> i) & 1;
             current = if bit == 0 {
-                bud_vm::poseidon4_hash(current, siblings[i])
+                bud_vm::poseidon4_hash(current, sibling)
             } else {
-                bud_vm::poseidon4_hash(siblings[i], current)
+                bud_vm::poseidon4_hash(sibling, current)
             };
         }
         let root = current;
         vm.memory[256..264].copy_from_slice(&key.to_le_bytes());
-        for i in 0..64 {
+        for (i, &sibling) in siblings.iter().enumerate() {
             let off = 264 + i * 8;
-            vm.memory[off..off + 8].copy_from_slice(&siblings[i].to_le_bytes());
+            vm.memory[off..off + 8].copy_from_slice(&sibling.to_le_bytes());
         }
         vm.registers[2] = root;
         vm.registers[3] = leaf;

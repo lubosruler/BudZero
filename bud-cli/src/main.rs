@@ -521,7 +521,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 commit_state: true,
             })?;
 
-            out.state.save();
+            out.state
+                .save()
+                .map_err(|e| format!("Failed to save state: {}", e))?;
             println!(
                 "Call success! Post-state Root: {:?}",
                 hex::encode(out.post_root)

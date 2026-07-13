@@ -26,7 +26,7 @@ pub trait StateBackend {
 pub struct State {
     accounts: HashMap<u64, Account>,
     path: String,
-    backup: Option<HashMap<u64, Account>>,
+    backup_stack: Vec<HashMap<u64, Account>>,
 }
 
 pub fn hash_account(acc: &Account) -> Hash {
@@ -159,12 +159,14 @@ impl State {
         Ok(Self {
             accounts,
             path: path.to_string(),
-            backup: None,
+            backup_stack: Vec::new(),
         })
     }
 
-    pub fn save(&self) {
-        self.save_atomic().expect("Failed to save state atomically");
+    /// Persist state to disk. Returns an error on I/O failure instead of panicking
+    /// (Tur 11.5 / A10 — disk full / permission errors must not abort the process).
+    pub fn save(&self) -> Result<(), String> {
+        self.save_atomic()
     }
 
     pub fn save_to(&self, path: &str) -> Result<(), String> {
@@ -225,16 +227,20 @@ impl StateBackend for State {
     }
 
     fn begin_transaction(&mut self) {
-        self.backup = Some(self.accounts.clone());
+        // Tur 11.5 / A9: nested transactions via LIFO backup stack.
+        // A second begin no longer clobbers the outer snapshot.
+        self.backup_stack.push(self.accounts.clone());
     }
 
     fn commit(&mut self) -> Result<(), String> {
-        self.backup = None;
+        // Drop the innermost snapshot; parent frames stay intact.
+        self.backup_stack.pop();
         self.save_atomic()
     }
 
     fn rollback(&mut self) {
-        if let Some(backup) = self.backup.take() {
+        // Restore the parent transaction's unmodified state.
+        if let Some(backup) = self.backup_stack.pop() {
             self.accounts = backup;
         }
     }
@@ -259,7 +265,7 @@ mod tests {
         state.set_account(1, acc.clone());
         assert_eq!(state.get_account(1), Some(acc));
 
-        state.save();
+        state.save().unwrap();
         assert!(std::path::Path::new(temp_file).exists());
 
         let loaded = State::load(temp_file).unwrap();
@@ -289,7 +295,7 @@ mod tests {
                 storage_root: [0u8; 32],
             },
         );
-        state.save();
+        state.save().unwrap();
 
         state.begin_transaction();
         state.set_account(
@@ -399,5 +405,127 @@ mod tests {
             get_empty_hash(0),
             &proof_empty
         ));
+    }
+
+    /// Tur 11.5 / A9: nested begin/rollback must restore each frame independently.
+    #[test]
+    fn tur115_nested_transaction_stack() {
+        let temp_file = "test_state_nested.json";
+        let _ = fs::remove_file(temp_file);
+        let mut state = State::load(temp_file).unwrap();
+        state.set_account(
+            1,
+            Account {
+                nonce: 0,
+                balance: 100,
+                code_hash: [0u8; 32],
+                storage_root: [0u8; 32],
+            },
+        );
+
+        // Outer transaction
+        state.begin_transaction();
+        state.set_account(
+            1,
+            Account {
+                nonce: 1,
+                balance: 200,
+                code_hash: [0u8; 32],
+                storage_root: [0u8; 32],
+            },
+        );
+
+        // Inner transaction (must not clobber outer backup)
+        state.begin_transaction();
+        state.set_account(
+            1,
+            Account {
+                nonce: 2,
+                balance: 300,
+                code_hash: [0u8; 32],
+                storage_root: [0u8; 32],
+            },
+        );
+        assert_eq!(state.get_account(1).unwrap().balance, 300);
+
+        // Roll back inner -> outer's post-begin state (balance 200)
+        state.rollback();
+        assert_eq!(state.get_account(1).unwrap().balance, 200);
+        assert_eq!(state.get_account(1).unwrap().nonce, 1);
+
+        // Roll back outer -> original state (balance 100)
+        state.rollback();
+        assert_eq!(state.get_account(1).unwrap().balance, 100);
+        assert_eq!(state.get_account(1).unwrap().nonce, 0);
+
+        // Nested commit: outer begin, inner begin+commit, outer rollback
+        // must restore pre-outer state (inner commit only drops its snapshot).
+        state.begin_transaction(); // outer
+        state.set_account(
+            1,
+            Account {
+                nonce: 5,
+                balance: 500,
+                code_hash: [0u8; 32],
+                storage_root: [0u8; 32],
+            },
+        );
+        state.begin_transaction(); // inner
+        state.set_account(
+            1,
+            Account {
+                nonce: 6,
+                balance: 600,
+                code_hash: [0u8; 32],
+                storage_root: [0u8; 32],
+            },
+        );
+        state.commit().unwrap(); // pop inner only
+        assert_eq!(state.get_account(1).unwrap().balance, 600);
+        state.rollback(); // restore outer snapshot (balance 100)
+        assert_eq!(state.get_account(1).unwrap().balance, 100);
+
+        let _ = fs::remove_file(temp_file);
+        let _ = fs::remove_file(format!("{}.tmp", temp_file));
+    }
+
+    /// Tur 11.5 / A10: save() returns Result; success path still works.
+    #[test]
+    fn tur115_save_returns_result_on_success() {
+        let temp_file = "test_state_save_result.json";
+        let _ = fs::remove_file(temp_file);
+        let mut state = State::load(temp_file).unwrap();
+        state.set_account(
+            7,
+            Account {
+                nonce: 1,
+                balance: 42,
+                code_hash: [0u8; 32],
+                storage_root: [0u8; 32],
+            },
+        );
+        state.save().expect("save must succeed on a writable path");
+        let loaded = State::load(temp_file).unwrap();
+        assert_eq!(loaded.get_account(7).unwrap().balance, 42);
+        fs::remove_file(temp_file).unwrap();
+    }
+
+    /// Tur 11.5 / A10: save() must not panic on I/O failure; it returns Err.
+    #[test]
+    fn tur115_save_returns_err_on_unwritable_path() {
+        // Point state path at a non-existent directory so rename/create fails.
+        let bad_path = "/this/path/definitely/does/not/exist/state.json";
+        let state = State {
+            accounts: HashMap::new(),
+            path: bad_path.to_string(),
+            backup_stack: Vec::new(),
+        };
+        let err = state
+            .save()
+            .expect_err("save to missing directory must return Err, not panic");
+        assert!(
+            !err.is_empty(),
+            "error message should be non-empty, got: {err:?}"
+        );
     }
 }
