@@ -668,9 +668,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             .when_transition()
             .when(is_verify_merkle.clone())
             .when(nxt_is_expand.clone())
-            .assert_zero(
-                nxt_merkle_current.clone() - rs2_val.clone(),
-            );
+            .assert_zero(nxt_merkle_current.clone() - rs2_val.clone());
 
         // (Old long comment removed; the inverse-witness and
         // Poseidon constraints above close Z-B. The leaf
