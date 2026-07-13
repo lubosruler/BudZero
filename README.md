@@ -12,7 +12,7 @@
 
 ---
 
-## The 2035 Vision — Universal Settlement Layer
+## The Vision — Universal Settlement Layer
 
 Every blockchain today is an island. Bitcoin is secure but slow;
 Ethereum is fast but permissioned at the validator set; CBDCs are
