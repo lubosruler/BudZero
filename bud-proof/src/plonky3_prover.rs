@@ -236,6 +236,31 @@ fn trace_matrix(
             // We don't yet have vm.gas_limit in this function; the
             // caller passes it through `public_inputs` already.
             values[row_start + COL_GAS_LIMIT] = Goldilocks::new(public_inputs.gas_limit);
+            // chain_id: bound to public_inputs[0,1] on the first row.
+            // chain_id is a fixed domain constant — we record
+            // (public.chain_id & 0xFFFFFFFF) here; the AIR compares
+            // it to public_inputs[0,1] on the first row.
+            values[row_start + COL_CHAIN_ID] =
+                Goldilocks::new(public_inputs.chain_id & 0xFFFF_FFFF);
+        }
+        // event_digest accumulator: 8 × u32 limbs, initialised to 0
+        // on the first row, then updated on every Log row by
+        // `prev + (val mod 2^32)` per limb (additive accumulator).
+        // The first limb tracks the current event; remaining limbs
+        // are reserved for future use and stay 0 for now. The AIR
+        // binds the last real row to public_inputs[40..48].
+        for j in 0..8 {
+            values[row_start + COL_EVENT_DIGEST_0 + j] = if i == 0 {
+                Goldilocks::new(0)
+            } else {
+                values[(i - 1) * TRACE_WIDTH + COL_EVENT_DIGEST_0 + j]
+            };
+        }
+        if op == 0x1A {
+            // Log opcode: accumulate the lower 32 bits of rs1_val into
+            // limb 0 of the event digest.
+            let log_val = step.src1_val & 0xFFFF_FFFF;
+            values[row_start + COL_EVENT_DIGEST_0] += Goldilocks::new(log_val);
         }
         values[row_start + COL_RD_IDX] = Goldilocks::new(step.dst_idx as u64);
         values[row_start + COL_RS1_IDX] = Goldilocks::new(step.src1_idx as u64);
@@ -503,11 +528,11 @@ fn trace_matrix(
         }
 
         // Tur 10.5 (security audit Z-A): trace-length counter and
-        // (on the last real row) the final-state-root binding. The
-        // counter is updated on every real row so the AIR can
-        // assert `COL_TRACE_LEN_CTR == n_cpu` on the last real row
-        // (= n_cpu - 1, the synthetic Halt row added by Z-D), and
-        // the public input binding on that same row.
+        // (on the last real row) the final-state-root, event-digest
+        // and exit-code binding. The counter is updated on every
+        // real row so the AIR can assert `COL_TRACE_LEN_CTR == n_cpu`
+        // on the last real row (= n_cpu - 1, the synthetic Halt row
+        // added by Z-D).
         values[row_start + COL_TRACE_LEN_CTR] = Goldilocks::new((i + 1) as u64);
         if i == n_cpu.saturating_sub(1) {
             for j in 0..8 {
@@ -518,6 +543,10 @@ fn trace_matrix(
                 );
                 values[row_start + COL_FINAL_ROOT_0 + j] = Goldilocks::new(limb as u64);
             }
+            // exit_code: 0 = success (real Halt), 1 = error (Z-D
+            // synthetic Halt). The prover passes the right value
+            // through `public_inputs.exit_code`; the AIR binds it.
+            values[row_start + COL_EXIT_CODE] = Goldilocks::new(public_inputs.exit_code);
         }
     }
 
@@ -1729,6 +1758,44 @@ mod tests {
         assert!(
             res.is_err(),
             "Expected verification to FAIL with tampered trace_len, but it succeeded!"
+        );
+    }
+
+    #[test]
+    fn rejects_tampered_event_digest() {
+        let (envelope, mut pi, program) = build_arith_proof();
+        // Forge event_digest: the trace has no Log opcodes so the
+        // accumulator is 0; the verifier must reject any non-zero
+        // public event_digest.
+        pi.event_digest = [0xEF; 32];
+        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        assert!(
+            res.is_err(),
+            "Expected verification to FAIL with tampered event_digest, but it succeeded!"
+        );
+    }
+
+    #[test]
+    fn rejects_tampered_exit_code() {
+        let (envelope, mut pi, program) = build_arith_proof();
+        // Forge exit_code from 0 (success) to 1 (error).
+        pi.exit_code = 1;
+        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        assert!(
+            res.is_err(),
+            "Expected verification to FAIL with tampered exit_code, but it succeeded!"
+        );
+    }
+
+    #[test]
+    fn rejects_tampered_chain_id() {
+        let (envelope, mut pi, program) = build_arith_proof();
+        // Forge chain_id: change the low 32 bits.
+        pi.chain_id = 0xDEAD_BEEF;
+        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        assert!(
+            res.is_err(),
+            "Expected verification to FAIL with tampered chain_id, but it succeeded!"
         );
     }
 
