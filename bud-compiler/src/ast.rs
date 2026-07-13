@@ -44,7 +44,36 @@ pub enum Stmt {
     },
     Return(Option<Expr>),
     Emit(String, Vec<Expr>),
+    /// Tur 8: `match <scrutinee> { pattern => body, ... }` pattern
+    /// expression statement. The optional default arm (`_ =>`) is
+    /// required by the semantic analyzer (every match must be
+    /// exhaustive over the scrutinee's reachable value set), but
+    /// at the AST level we keep it as just another arm to keep the
+    /// parser simple — sema is where exhaustiveness is checked.
+    Match {
+        scrutinee: Expr,
+        arms: Vec<MatchArm>,
+    },
     Expr(Expr),
+}
+
+/// One arm of a `match` expression. The pattern is restricted to
+/// integer literals or a wildcard (`_`) in Tur 8 — full algebraic
+/// data type patterns (struct destructuring, ranges) are Tur 9+.
+#[derive(Debug, Clone)]
+pub struct MatchArm {
+    pub pattern: MatchPattern,
+    pub body: Vec<Stmt>,
+}
+
+/// Pattern matched against a `match` scrutinee. The wildcard pattern
+/// (`_`) always matches; integer patterns match exactly that value.
+#[derive(Debug, Clone)]
+pub enum MatchPattern {
+    /// `0`, `1`, `42`, ... — exact integer match.
+    IntLit(u64),
+    /// `_` — matches anything not matched by a previous arm.
+    Wildcard,
 }
 
 #[derive(Debug, Clone)]

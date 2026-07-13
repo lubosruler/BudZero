@@ -290,6 +290,49 @@ impl<'a> Parser<'a> {
                 self.expect(Token::BraceClose)?;
                 Ok(Stmt::While(cond, body))
             }
+            Token::Match => {
+                self.consume();
+                self.expect(Token::ParenOpen)?;
+                let scrutinee = self.parse_expr()?;
+                self.expect(Token::ParenClose)?;
+                self.expect(Token::BraceOpen)?;
+                let mut arms = Vec::new();
+                // Parse arms one at a time. A `,` separates arms; the
+                // closing `}` ends the match. The grammar is
+                // `{ arm (`,` arm)* `}` with optional trailing comma:
+                // we therefore consume any leading `,` between arms
+                // before parsing the next one. (A leading `,` without
+                // a preceding arm is rejected here as well.)
+                loop {
+                    if self.peek() == &Token::BraceClose {
+                        break;
+                    }
+                    if self.peek() == &Token::Comma {
+                        // Trailing comma is allowed (`_ => x,`).
+                        self.consume();
+                        if self.peek() == &Token::BraceClose {
+                            break;
+                        }
+                        continue;
+                    }
+                    arms.push(self.parse_match_arm()?);
+                    if self.peek() == &Token::Comma {
+                        self.consume();
+                    } else if self.peek() == &Token::BraceClose {
+                        break;
+                    } else {
+                        return Err(CompileError::ParserError(
+                            "expected ',' or '}' after match arm".to_string(),
+                        ));
+                    }
+                }
+                self.expect(Token::BraceClose)?;
+                // Match is a statement-level form, so it must be
+                // terminated by a semicolon (consistent with `if`,
+                // `while`, `for`).
+                self.expect(Token::Semicolon)?;
+                Ok(Stmt::Match { scrutinee, arms })
+            }
             Token::For => {
                 self.consume();
                 let var = if let Token::Ident(name) = self.consume() {
@@ -438,6 +481,43 @@ impl<'a> Parser<'a> {
         }
 
         Ok(left)
+    }
+
+    /// Parse one `pattern => body` arm of a `match` expression.
+    ///
+    /// Tur 8 patterns: integer literal (`0`, `1`, `42`) or wildcard
+    /// (`_`). Struct destructuring / range patterns are Tur 9+.
+    fn parse_match_arm(&mut self) -> Result<MatchArm, CompileError> {
+        let pattern = match self.peek() {
+            Token::Ident(name) if name == "_" => {
+                self.consume();
+                MatchPattern::Wildcard
+            }
+            Token::Int(val) => {
+                let v = *val;
+                self.consume();
+                MatchPattern::IntLit(v)
+            }
+            _ => {
+                return Err(CompileError::ParserError(
+                    "match arm pattern must be an integer literal or '_'".to_string(),
+                ));
+            }
+        };
+        self.expect(Token::FatArrow)?;
+        let mut body = Vec::new();
+        // A single-arm body can be a block (`{ ... }`) or a single
+        // statement terminated by `,` (next arm) or `}` (last arm).
+        if self.peek() == &Token::BraceOpen {
+            self.consume();
+            while self.peek() != &Token::BraceClose {
+                body.push(self.parse_stmt()?);
+            }
+            self.expect(Token::BraceClose)?;
+        } else {
+            body.push(self.parse_stmt()?);
+        }
+        Ok(MatchArm { pattern, body })
     }
 
     fn parse_primary(&mut self) -> Result<Expr, CompileError> {

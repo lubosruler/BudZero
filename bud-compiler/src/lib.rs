@@ -252,4 +252,90 @@ mod tests {
         // p.y (20) + p.x (10) = 30
         assert_eq!(vm.events, vec![30]);
     }
+
+    // === TUR 8: PATTERN MATCHING (match expressions) ========================
+
+    /// `match` on an integer scrutinee dispatches to the correct arm.
+    /// 0 → 100, 1 → 200, anything else → 999.
+    ///
+    /// Tur 8 limitation: `match` is only allowed as an expression
+    /// statement (its result register is not yet surfaced as a
+    /// value to `let`/`return` bindings). This is a deliberate
+    /// boundary — surfacing a value requires a dedicated
+    /// "result register" convention that conflicts with the
+    /// current `r31` HEAP_PTR reservation; it is deferred to Tur 9.
+    /// For now the test asserts the dispatch + jump-chain codegen
+    /// by emitting different events per arm inside a block.
+    #[test]
+    fn test_match_integer_scrutinee_dispatches_correctly() {
+        let source = r#"
+            contract MatchTest {
+                pub fn main() {
+                    let x = 0;
+                    match (x) {
+                        0 => { emit Result(100); },
+                        1 => { emit Result(200); },
+                        _ => { emit Result(999); },
+                    };
+                }
+            }
+        "#;
+        let bytecode = compile(source, IsaProfile::Production)
+            .expect("match should compile in production");
+        let mut vm = bud_vm::Vm::new(8192);
+        vm.run(&bytecode).expect("VM should run");
+        assert_eq!(vm.events, vec![100]);
+    }
+
+    /// `match` arms can have a *block* body (multiple statements).
+    /// Verifies that the body of an arm runs to completion before the
+    /// post-match control flow continues.
+    #[test]
+    fn test_match_arm_with_block_body() {
+        let source = r#"
+            contract MatchBlock {
+                pub fn main() {
+                    let x = 0;
+                    let a = 10;
+                    let b = 20;
+                    match (x) {
+                        0 => {
+                            let sum = a + b;
+                            emit Result(sum);
+                        },
+                        _ => {
+                            emit Result(0);
+                        },
+                    };
+                }
+            }
+        "#;
+        let bytecode = compile(source, IsaProfile::Production)
+            .expect("match with block body should compile");
+        let mut vm = bud_vm::Vm::new(8192);
+        vm.run(&bytecode).expect("VM should run");
+        // 0 → 10 + 20 = 30
+        assert_eq!(vm.events, vec![30]);
+    }
+
+    /// The wildcard arm (`_`) is required for exhaustive matching
+    /// (semantic-checked Tur 9); the parser only requires syntactic
+    /// validity. Verifies the parser rejects patterns that are not
+    /// integer literals or `_`.
+    #[test]
+    fn test_match_rejects_non_integer_pattern() {
+        let source = r#"
+            contract BadMatch {
+                pub fn main() {
+                    let x = 0;
+                    match (x) {
+                        foo => { emit Result(1); },
+                        _ => { emit Result(0); },
+                    };
+                }
+            }
+        "#;
+        let res = compile(source, IsaProfile::Production);
+        assert!(res.is_err(), "non-integer, non-wildcard pattern must fail");
+    }
 }

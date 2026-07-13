@@ -184,6 +184,26 @@ impl SemanticAnalyzer {
                     self.analyze_expr(arg, env, errors);
                 }
             }
+            // Tur 8: pattern matching. The scrutinee must be an integer
+            // expression (`u64`). Each arm body is analyzed in a
+            // child scope. Exhaustiveness is checked in Tur 9; for
+            // now we just require the arm to syntactically parse and
+            // each body to type-check.
+            Stmt::Match { scrutinee, arms } => {
+                let scrutinee_ty = self.analyze_expr(scrutinee, env, errors);
+                if scrutinee_ty != Type::U64 && scrutinee_ty != Type::Bool {
+                    errors.push(CompileError::SemanticError(format!(
+                        "match scrutinee must be u64 or bool, got {:?}",
+                        scrutinee_ty
+                    )));
+                }
+                for arm in arms {
+                    let mut arm_env = env.clone();
+                    for s in &arm.body {
+                        self.analyze_stmt(s, &mut arm_env, errors);
+                    }
+                }
+            }
             Stmt::Expr(expr) => {
                 self.analyze_expr(expr, env, errors);
             }

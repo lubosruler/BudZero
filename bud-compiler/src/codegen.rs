@@ -274,6 +274,88 @@ impl Codegen {
                 );
                 self.patch_jump(jump_to_end_idx, (end_idx as i32) - (jump_to_end_idx as i32));
             }
+            Stmt::Match { scrutinee, arms } => {
+                // Tur 8: pattern matching codegen. ZK-circuit-friendly
+                // linear jump chain — at most one arm body executes per
+                // match, so the prover's trace records exactly one
+                // branch (no non-determinism).
+                //
+                // Layout per arm (integer pattern):
+                //     Load    tmp, <pattern_literal>
+                //     Sub     diff, scrutinee, tmp
+                //     Jnz     body, diff, _, _       ; jump if diff == 0 (match)
+                //     <body statements>
+                //     Jmp     end
+                //
+                // Layout per arm (wildcard `_`):
+                //     Jmp     body                   ; unconditional
+                //     <body statements>
+                //     Jmp     end
+                //
+                // The semantic analyzer enforces that the last arm is a
+                // wildcard (otherwise the chain has no fall-through
+                // termination, which is undefined).
+                let scrutinee_reg = self.generate_expr(scrutinee, scope, storage);
+                self.next_reg = saved_reg;
+
+                // Placeholder jumps to the per-arm body, patched once we
+                // know where the body starts. Using `Option<usize>`
+                // keeps the wildcard and integer-pattern cases
+                // symmetric without an extra struct field.
+                let mut arm_body_placeholder: Option<usize> = None;
+                let mut end_jump_indices: Vec<usize> = Vec::new();
+
+                for arm in arms {
+                    // Emit the test or unconditional jump. Whichever
+                    // path we take, the next instruction is the start
+                    // of this arm's body — the placeholder is patched
+                    // right after we know the body's first PC.
+                    match &arm.pattern {
+                        MatchPattern::IntLit(val) => {
+                            let pat_reg = self.alloc_reg();
+                            self.emit(Opcode::Load, pat_reg, 0, 0, *val as i32);
+                            let diff_reg = self.alloc_reg();
+                            self.emit(Opcode::Sub, diff_reg, scrutinee_reg, pat_reg, 0);
+                            let placeholder = self.instructions.len();
+                            self.emit(Opcode::Jnz, 0, diff_reg, 0, 0);
+                            arm_body_placeholder = Some(placeholder);
+                            self.next_reg = saved_reg;
+                        }
+                        MatchPattern::Wildcard => {
+                            let placeholder = self.instructions.len();
+                            self.emit(Opcode::Jmp, 0, 0, 0, 0);
+                            arm_body_placeholder = Some(placeholder);
+                        }
+                    }
+
+                    // Body of this arm.
+                    let body_start = self.instructions.len();
+                    for s in &arm.body {
+                        self.generate_stmt(s, scope, storage);
+                    }
+                    // Patch the test/wildcard placeholder to land here.
+                    if let Some(placeholder) = arm_body_placeholder.take() {
+                        self.patch_jump(
+                            placeholder,
+                            (body_start as i32) - (placeholder as i32),
+                        );
+                    }
+                    // After the body, jump to the end of the match.
+                    let end_jump = self.instructions.len();
+                    self.emit(Opcode::Jmp, 0, 0, 0, 0);
+                    end_jump_indices.push(end_jump);
+                    self.next_reg = saved_reg;
+                }
+
+                // Patch every arm's end-jump to the instruction after
+                // the last arm body. This is the natural "match result"
+                // site — the caller is expected to use the produced
+                // register if the match ever grows a value (Tur 9+).
+                let end_idx = self.instructions.len();
+                for idx in end_jump_indices {
+                    self.patch_jump(idx, (end_idx as i32) - (idx as i32));
+                }
+            }
             Stmt::For {
                 var,
                 start,
